@@ -18,7 +18,7 @@ env:
 
 jobs:
   build:
-    name: Build Linux ${{ env.KERNEL_VERSION }} (ARM64 16 KiB)
+    name: Build Linux 6.12.59 (ARM64 16 KiB)
     runs-on: ubuntu-24.04
     steps:
       - name: Check out configuration
@@ -46,7 +46,7 @@ jobs:
           cp config-aarch64 "linux-${KERNEL_VERSION}/.config"
 
       - name: Resolve Kconfig dependencies
-        working-directory: linux-${{ env.KERNEL_VERSION }}
+        working-directory: linux-6.12.59
         run: |
           set -eu
           make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
@@ -63,7 +63,7 @@ jobs:
           fi
 
       - name: Build kernel
-        working-directory: linux-${{ env.KERNEL_VERSION }}
+        working-directory: linux-6.12.59
         run: |
           make -j"$(nproc)" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" Image
 
