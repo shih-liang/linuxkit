@@ -1,0 +1,111 @@
+name: Build LightHouse ARM64 16K kernel
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'lighthouse-kernel-v*'
+
+permissions:
+  contents: write
+
+env:
+  KERNEL_VERSION: '6.12.59'
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+
+jobs:
+  build:
+    name: Build Linux ${{ env.KERNEL_VERSION }} (ARM64 16 KiB)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out configuration
+        uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bc bison build-essential cpio flex gcc-aarch64-linux-gnu \
+            libelf-dev libssl-dev pahole python3 rsync xz-utils
+
+      - name: Download and verify Linux source
+        run: |
+          set -eu
+          base="https://cdn.kernel.org/pub/linux/kernel/v6.x"
+          curl --fail --location --retry 5 --retry-all-errors \
+            "${base}/linux-${KERNEL_VERSION}.tar.xz" \
+            --output "linux-${KERNEL_VERSION}.tar.xz"
+          curl --fail --location --retry 5 --retry-all-errors \
+            "${base}/sha256sums.asc" --output sha256sums.asc
+          grep " linux-${KERNEL_VERSION}.tar.xz$" sha256sums.asc \
+            | sha256sum --check --strict -
+          tar --extract --file "linux-${KERNEL_VERSION}.tar.xz"
+          cp config-aarch64 "linux-${KERNEL_VERSION}/.config"
+
+      - name: Resolve Kconfig dependencies
+        working-directory: linux-${{ env.KERNEL_VERSION }}
+        run: |
+          set -eu
+          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          test "$(grep -E '^CONFIG_ARM64_16K_PAGES=y$' .config | wc -l)" -eq 1
+          test "$(grep -E '^# CONFIG_ARM64_4K_PAGES is not set$' .config | wc -l)" -eq 1
+          if grep -E '^CONFIG_[A-Za-z0-9_]+=m$' .config; then
+            echo 'The LightHouse kernel must not leave retained features as modules.' >&2
+            exit 1
+          fi
+          # VZ supplies virtio devices; these physical PCI storage paths must stay off.
+          if grep -E '^CONFIG_(SCSI_(HPSA|HISI_SAS|SMARTPQI|VIRTIO)|ATA=y|SATA_|PATA_|NVME_|BLK_DEV_NVME)=y$' .config; then
+            echo 'A VZ-absent SCSI/SATA/NVMe driver is enabled.' >&2
+            exit 1
+          fi
+
+      - name: Build kernel
+        working-directory: linux-${{ env.KERNEL_VERSION }}
+        run: |
+          make -j"$(nproc)" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" Image
+
+      - name: Package kernel and metadata
+        run: |
+          set -eu
+          mkdir -p release
+          cp "linux-${KERNEL_VERSION}/arch/arm64/boot/Image" \
+            "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image"
+          cp "linux-${KERNEL_VERSION}/.config" release/config-aarch64
+          cp "linux-${KERNEL_VERSION}/System.map" release/System.map
+          tar --create --gzip --file \
+            "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" \
+            -C release .
+          mkdir -p artifact
+          cp "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" artifact/
+          (cd artifact && sha256sum \
+            "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" > SHA256SUMS)
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-linux-${{ env.KERNEL_VERSION }}-arm64-16k
+          path: artifact/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/lighthouse-kernel-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lighthouse-linux-${{ env.KERNEL_VERSION }}-arm64-16k
+          path: release
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          generate_release_notes: true
+          files: |
+            release/lighthouse-linux-${{ env.KERNEL_VERSION }}-arm64-16k.tar.gz
+            release/SHA256SUMS
