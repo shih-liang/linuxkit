@@ -35,10 +35,29 @@ jobs:
         run: |
           set -eu
           base="https://cdn.kernel.org/pub/linux/kernel/v6.x"
-          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
-            --retry-max-time 300 --retry-all-errors \
+          download_resumable() {
+            url="$1"
+            output="$2"
+            attempt=1
+            while :; do
+              if curl --http1.1 --fail --location --continue-at - \
+                --connect-timeout 30 --speed-time 60 --speed-limit 1024 \
+                --retry 3 --retry-delay 5 --retry-max-time 120 \
+                --retry-all-errors "$url" --output "$output"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 12 ]; then
+                echo "download failed after $attempt resumable attempts: $url" >&2
+                return 1
+              fi
+              echo "download interrupted; resuming in 5 seconds (attempt $attempt/12)" >&2
+              attempt=$((attempt + 1))
+              sleep 5
+            done
+          }
+          download_resumable \
             "${base}/linux-${KERNEL_VERSION}.tar.xz" \
-            --output "linux-${KERNEL_VERSION}.tar.xz"
+            "linux-${KERNEL_VERSION}.tar.xz"
           curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
             --retry-max-time 300 --retry-all-errors \
             "${base}/sha256sums.asc" --output sha256sums.asc
