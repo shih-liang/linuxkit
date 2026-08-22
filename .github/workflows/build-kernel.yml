@@ -3,6 +3,8 @@ name: Build LightHouse ARM64 16K kernel
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - 'lighthouse-kernel-v*'
 
