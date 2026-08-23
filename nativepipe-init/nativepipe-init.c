@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -89,8 +90,6 @@ static void default_options(struct np_options *options) {
     memset(options, 0, sizeof(*options));
     options->mode = NP_MODE_NORMAL;
     options->automatic = true;
-    copy_value(options->root, sizeof(options->root), "/dev/vda2");
-    copy_value(options->disk, sizeof(options->disk), "/dev/vda");
     copy_value(options->payload_tag, sizeof(options->payload_tag), "nativepipe-install");
     copy_value(options->adapter, sizeof(options->adapter),
                NP_PAYLOAD_ROOT "/adapter.sh");
@@ -225,6 +224,75 @@ static int run(char *const argv[]) {
     return wait_child(child);
 }
 
+static bool virtio_block_name(const char *name) {
+    if (strncmp(name, "vd", 2) != 0 || !name[2])
+        return false;
+    for (const unsigned char *p = (const unsigned char *)name + 2; *p; p++) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9'))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool sysfs_attribute_exists(const char *name, const char *attribute) {
+    char path[512];
+    snprintf(path, sizeof(path), "/sys/class/block/%s/%s", name, attribute);
+    return access(path, F_OK) == 0;
+}
+
+static bool block_device_is_read_only(const char *name) {
+    char path[512];
+    snprintf(path, sizeof(path), "/sys/class/block/%s/ro", name);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return true;
+    char value = '1';
+    ssize_t count = read(fd, &value, 1);
+    close(fd);
+    return count != 1 || value != '0';
+}
+
+static int find_single_install_disk(char *destination, size_t capacity) {
+    DIR *directory = opendir("/sys/class/block");
+    if (!directory)
+        return -1;
+    unsigned count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        if (!virtio_block_name(entry->d_name) ||
+            sysfs_attribute_exists(entry->d_name, "partition") ||
+            block_device_is_read_only(entry->d_name))
+            continue;
+        char candidate[256];
+        snprintf(candidate, sizeof(candidate), "/dev/%s", entry->d_name);
+        if (++count == 1)
+            copy_value(destination, capacity, candidate);
+    }
+    closedir(directory);
+    if (count == 1)
+        return 0;
+    errno = count == 0 ? ENODEV : ENOTUNIQ;
+    return -1;
+}
+
+static int resolve_install_disk(struct np_options *options) {
+    if (options->disk[0])
+        return 0;
+    for (unsigned attempt = 0; attempt < 100; attempt++) {
+        if (find_single_install_disk(options->disk, sizeof(options->disk)) == 0) {
+            logmsg("selected the only writable virtio disk: %s", options->disk);
+            return 0;
+        }
+        if (errno == ENOTUNIQ)
+            break;
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000000};
+        nanosleep(&delay, NULL);
+    }
+    logmsg("cannot select an install disk safely; pass nativepipe.disk=/dev/vdX");
+    return -1;
+}
+
 static int mount_payload(const struct np_options *options) {
     return mount_once(options->payload_tag, NP_PAYLOAD_ROOT, "virtiofs",
                       MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
@@ -287,10 +355,51 @@ static bool root_is_mounted(void) {
     return found;
 }
 
-static int mount_root(const struct np_options *options) {
+static int probe_installed_root(char *destination, size_t capacity) {
+    make_directory("/run/nativepipe/probe", 0755);
+    DIR *directory = opendir("/sys/class/block");
+    if (!directory)
+        return -1;
+    unsigned matches = 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        if (!virtio_block_name(entry->d_name) ||
+            !sysfs_attribute_exists(entry->d_name, "partition"))
+            continue;
+        char device[256];
+        snprintf(device, sizeof(device), "/dev/%s", entry->d_name);
+        char *const mount_arguments[] = {
+            "/bin/mount", "-o", "ro", device, "/run/nativepipe/probe", NULL,
+        };
+        if (run(mount_arguments) != 0)
+            continue;
+        if (access("/run/nativepipe/probe/etc/nativepipe/installation", R_OK) == 0) {
+            if (++matches == 1)
+                copy_value(destination, capacity, device);
+        }
+        char *const unmount_arguments[] = {
+            "/bin/umount", "/run/nativepipe/probe", NULL,
+        };
+        run(unmount_arguments);
+    }
+    closedir(directory);
+    if (matches == 1)
+        return 0;
+    errno = matches == 0 ? ENOENT : ENOTUNIQ;
+    return -1;
+}
+
+static int mount_root(struct np_options *options) {
     make_directory(NP_NEW_ROOT, 0755);
     if (root_is_mounted())
         return 0;
+    if (!options->root[0]) {
+        if (probe_installed_root(options->root, sizeof(options->root)) < 0) {
+            logmsg("installed root marker was not found; pass root=PARTUUID=...");
+            return -1;
+        }
+        logmsg("found installed root at %s", options->root);
+    }
     for (unsigned attempt = 0; attempt < 100; attempt++) {
         char *const arguments[] = {
             "/bin/mount", "-o", "rw", (char *)options->root, NP_NEW_ROOT, NULL,
@@ -305,7 +414,7 @@ static int mount_root(const struct np_options *options) {
     return -1;
 }
 
-static void switch_to_root(const struct np_options *options) {
+static void switch_to_root(struct np_options *options) {
     if (mount_root(options) < 0)
         return;
     if (access(NP_NEW_ROOT "/sbin/init", X_OK) < 0) {
@@ -357,7 +466,7 @@ static int read_cmdline(char *buffer, size_t capacity) {
 static int self_test(void) {
     struct np_options options;
     if (parse_cmdline("", &options) < 0 || options.mode != NP_MODE_NORMAL ||
-        strcmp(options.root, "/dev/vda2") != 0)
+        options.root[0] || options.disk[0])
         return 1;
     if (parse_cmdline("nativepipe.mode=install root=UUID=abcd nativepipe.manual", &options) < 0 ||
         options.mode != NP_MODE_INSTALL || options.automatic ||
@@ -393,7 +502,8 @@ int main(int argc, char **argv) {
     }
     if (options.mode == NP_MODE_INSTALL || options.mode == NP_MODE_REPAIR) {
         const char *action = options.mode == NP_MODE_INSTALL ? "install" : "repair";
-        if (mount_payload(&options) < 0 || run_adapter(&options, action) != 0)
+        if (resolve_install_disk(&options) < 0 || mount_payload(&options) < 0 ||
+            run_adapter(&options, action) != 0)
             emergency_shell();
     }
 
