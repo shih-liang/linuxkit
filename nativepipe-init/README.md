@@ -28,3 +28,9 @@ filesystem itself; PID 1 adds no separate write policy.
 Installer and repair adapters are data rather than compiled branches. The host
 provides a read-only virtiofs payload containing the selected adapter and its
 source, and `nativepipe-init` invokes it with a small fixed environment.
+
+The initramfs includes upstream static e2fsprogs binaries for ext2/3/4:
+`mke2fs` (`mkfs.ext4`), `e2fsck` (`fsck.ext4`), `resize2fs`, `tune2fs`,
+`dumpe2fs`, and `blkid`. BusyBox supplies the recovery shell, basic adapter
+commands, `mount`/`umount`, and the initramfs-specific `switch_root`; its
+`tc`, `fsck`, and `mkfs.ext2` applets are deliberately disabled.
