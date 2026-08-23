@@ -1,12 +1,8 @@
 name: Build LightHouse ARM64 16K kernel and initramfs
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-    tags:
-      - 'lighthouse-kernel-v*'
+  release:
+    types: [published]
 
 permissions:
   contents: write
