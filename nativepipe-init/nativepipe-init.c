@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
-#include <linux/vm_sockets.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,6 +12,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <linux/vm_sockets.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
