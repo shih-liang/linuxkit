@@ -784,7 +784,7 @@ static int switch_to_root(const struct np_plan *plan) {
     mount("/run", NP_NEW_ROOT "/run", NULL, MS_MOVE, NULL);
     close_control_transport();
     char *const arguments[] = {
-        "/bin/switch_root", "-c", "/dev/console", NP_NEW_ROOT, "/sbin/init", NULL,
+        "/sbin/switch_root", "-c", "/dev/console", NP_NEW_ROOT, "/sbin/init", NULL,
     };
     execv(arguments[0], arguments);
     log_errno("exec installed init");

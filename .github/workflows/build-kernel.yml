@@ -136,6 +136,14 @@ jobs:
             CONFIG_PREFIX="$PWD/initramfs-root" install
           ln -s /proc/mounts initramfs-root/etc/mtab
           ln -s sbin/nativepipe-init initramfs-root/init
+          test -x initramfs-root/bin/sh
+          test -x initramfs-root/bin/mount
+          test -x initramfs-root/bin/umount
+          test -x initramfs-root/sbin/switch_root
+          test "$(readlink initramfs-root/sbin/switch_root)" = '../bin/busybox'
+          for tool in nativepipe-init mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid; do
+            test -x "initramfs-root/sbin/$tool"
+          done
           mkdir -p initramfs-root/dev initramfs-root/proc initramfs-root/sys \
             initramfs-root/run initramfs-root/newroot initramfs-root/tmp
           chmod 1777 initramfs-root/tmp
