@@ -1,45 +1,30 @@
 # nativepipe-init
 
-`nativepipe-init` is the fixed PID 1 for the LightHouse install and repair
-initramfs. Distribution-specific behavior is supplied by a read-only VirtioFS
-share named `nativepipe-install`; the initramfs does not download or embed
-distribution adapters.
+`nativepipe-init` is the static PID 1 in the LightHouse initramfs. In a normal
+boot it mounts the explicit kernel `root=` at `/newroot` and immediately runs
+`switch_root`; it does not open a control listener. With the explicit
+`nativepipe.maintenance=1` kernel flag it mounts `devtmpfs`, `/proc`, `/sys`,
+`/run`, and `/tmp`, then waits for a host request. It never guesses a disk and
+never enters a shell automatically.
 
-The share must contain `adapter.sh` and may contain a source artifact at
-`source`. The adapter receives one action (`install` or `repair`) and these
-environment variables:
+The process listens on virtio-vsock port 1024, the same control endpoint used
+by the installed `nativepipe-guestd`. Both stages use version-1 `NPIP` frames,
+little-endian request IDs, and the same `NPOK`/`NPER`, `NPRE`/`NPFL`/`NPLS`,
+`NPMS`/`NPFS`, and `NPWR` filesystem operations. `NPHI` reports an
+`init.control` capability while the initramfs is active. `switch_root` closes
+the listener; the host then reconnects to guestd on the same port.
 
-```text
-NP_TARGET_ROOT=/newroot
-NP_TARGET_DISK=/dev/vdX
-NP_SOURCE_PATH=/run/nativepipe/payload/source
-NP_AUTOMATIC=0|1
-```
+Init-only operations are:
 
-Supported kernel arguments:
+- `NPIH`: enumerate block devices and their VZ block identifiers.
+- `NPIM`: mount the exact identifier and partition selected by the host.
+- `NPIC`: boot, install, repair, or start a console shell.
 
-```text
-nativepipe.mode=normal|install|repair|shell
-nativepipe.root=PARTUUID=...
-nativepipe.disk=/dev/vdX
-nativepipe.payload_tag=nativepipe-install
-nativepipe.adapter=/run/nativepipe/payload/adapter.sh
-nativepipe.source=/run/nativepipe/payload/source
-nativepipe.manual
-```
+Paths presented to the host are ordinary absolute guest paths. During early
+boot they are resolved beneath `/newroot` with `openat2`, so a path cannot
+escape the explicitly mounted target. Write permission follows the mounted
+filesystem itself; PID 1 adds no separate write policy.
 
-After a successful install or repair action, `nativepipe-init` mounts the
-selected root and executes `/sbin/init` through BusyBox `switch_root`. Any
-failure opens a persistent emergency shell on the VM console.
-
-There are no default disk or root device names. In install and repair modes,
-the init process automatically selects a target only when exactly one writable
-whole Virtio block device exists. The adapter must mount the completed root at
-`/newroot` and create `/newroot/etc/nativepipe/installation`. On later normal
-boots, the marker is used to find the root when no explicit `root=` argument is
-present. Ambiguous disks are never selected automatically.
-
-The release publishes the bare arm64 kernel `Image` expected by
-`VZLinuxBootLoader.kernelURL` and a gzip-compressed `newc` archive for
-`VZLinuxBootLoader.initialRamdiskURL`. Virtualization maps the RAM disk into
-guest memory; the LightHouse kernel's `CONFIG_RD_GZIP` support decompresses it.
+Installer and repair adapters are data rather than compiled branches. The host
+provides a read-only virtiofs payload containing the selected adapter and its
+source, and `nativepipe-init` invokes it with a small fixed environment.
