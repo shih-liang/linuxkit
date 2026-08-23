@@ -410,7 +410,12 @@ static int resolve_disk_identifier(struct np_plan *plan) {
                     value[strcspn(value, "\r\n")] = '\0';
                 fclose(serial);
                 if (strcmp(value, plan->disk_identifier) == 0) {
-                    snprintf(plan->disk, sizeof(plan->disk), "/dev/%s", entry->d_name);
+                    size_t name_length = strnlen(entry->d_name, sizeof(entry->d_name));
+                    if (name_length > sizeof(plan->disk) - sizeof("/dev/"))
+                        continue;
+                    memcpy(plan->disk, "/dev/", sizeof("/dev/") - 1);
+                    memcpy(plan->disk + sizeof("/dev/") - 1, entry->d_name,
+                           name_length + 1);
                     closedir(directory);
                     return 0;
                 }
@@ -721,7 +726,13 @@ static int write_path(const uint8_t *payload, size_t length) {
     }
     uint32_t mode = read_le32(fixed);
     uint64_t size = read_le64(fixed + 4);
-    if (size > SIZE_MAX || size != reader.length - reader.offset) {
+#if SIZE_MAX < UINT64_MAX
+    if (size > SIZE_MAX) {
+        errno = EFBIG;
+        return -1;
+    }
+#endif
+    if ((size_t)size != reader.length - reader.offset) {
         errno = EINVAL;
         return -1;
     }
