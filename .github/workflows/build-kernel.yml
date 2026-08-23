@@ -73,7 +73,7 @@ jobs:
           tar --extract --file "${archive}"
           mkdir e2fsprogs-build
           cd e2fsprogs-build
-          "../e2fsprogs-${E2FSPROGS_VERSION}/configure" \
+          LDFLAGS=-static "../e2fsprogs-${E2FSPROGS_VERSION}/configure" \
             --host="${CROSS_COMPILE%-}" \
             --prefix=/usr \
             --enable-libblkid \
