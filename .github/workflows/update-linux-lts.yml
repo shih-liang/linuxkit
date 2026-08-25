@@ -1,0 +1,62 @@
+name: Propose latest Linux LTS
+
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-linux-lts
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: Check kernel.org
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out configuration
+        uses: actions/checkout@v4
+
+      - name: Update to newest supported LTS
+        id: version
+        run: |
+          set -euo pipefail
+          current="$(tr -d '[:space:]' < KERNEL_VERSION)"
+          latest="$(
+            curl --fail --location --retry 5 --retry-all-errors \
+              https://www.kernel.org/releases.json \
+              | jq -r '.releases[] | select(.moniker == "longterm" and .iseol == false) | .version' \
+              | sort -V \
+              | tail -n 1
+          )"
+          if ! printf '%s\n' "$latest" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "kernel.org returned an invalid LTS version: $latest" >&2
+            exit 1
+          fi
+          newest="$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n 1)"
+          if [ "$newest" != "$latest" ]; then
+            echo "Refusing to downgrade $current to $latest" >&2
+            exit 1
+          fi
+          printf '%s\n' "$latest" > KERNEL_VERSION
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+      - name: Create update pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          add-paths: KERNEL_VERSION
+          branch: automation/linux-lts-${{ steps.version.outputs.latest }}
+          delete-branch: true
+          commit-message: 'kernel: update Linux LTS to ${{ steps.version.outputs.latest }}'
+          title: 'kernel: update Linux LTS to ${{ steps.version.outputs.latest }}'
+          body: |
+            Updates the LightHouse kernel source to Linux `${{ steps.version.outputs.latest }}`,
+            reported as the newest supported longterm release by
+            [kernel.org](https://www.kernel.org/releases.json).
+
+            The release-only kernel workflow remains the build and publication gate.

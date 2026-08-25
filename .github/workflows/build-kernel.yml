@@ -8,19 +8,29 @@ permissions:
   contents: write
 
 env:
-  KERNEL_VERSION: '6.12.59'
   BUSYBOX_VERSION: '1.36.1'
   E2FSPROGS_VERSION: '1.47.4'
+  KATA_CONFIG_REF: '3.32.0'
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
 
 jobs:
   build:
-    name: Build Linux 6.12.59 (ARM64 16 KiB)
+    name: Build ARM64 16 KiB kernel
     runs-on: ubuntu-24.04
     steps:
       - name: Check out configuration
         uses: actions/checkout@v4
+
+      - name: Read kernel version
+        run: |
+          set -eu
+          kernel_version="$(tr -d '[:space:]' < KERNEL_VERSION)"
+          if ! printf '%s\n' "$kernel_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid KERNEL_VERSION: $kernel_version" >&2
+            exit 1
+          fi
+          echo "KERNEL_VERSION=$kernel_version" >> "$GITHUB_ENV"
 
       - name: Install kernel build dependencies
         run: |
@@ -160,7 +170,8 @@ jobs:
       - name: Download and verify Linux source
         run: |
           set -eu
-          base="https://cdn.kernel.org/pub/linux/kernel/v6.x"
+          major="${KERNEL_VERSION%%.*}"
+          base="https://cdn.kernel.org/pub/linux/kernel/v${major}.x"
           download_resumable() {
             url="$1"
             output="$2"
@@ -190,30 +201,192 @@ jobs:
           grep " linux-${KERNEL_VERSION}.tar.xz$" sha256sums.asc \
             | sha256sum --check --strict -
           tar --extract --file "linux-${KERNEL_VERSION}.tar.xz"
-          cp config-aarch64 "linux-${KERNEL_VERSION}/.config"
+
+      - name: Merge Kata ARM64 and LightHouse configuration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          kernel_tree="linux-${KERNEL_VERSION}"
+          fragments="$PWD/kata-config-fragments"
+          mkdir -p "$fragments/common" "$fragments/arm64"
+
+          download_scope() {
+            scope="$1"
+            api="repos/kata-containers/kata-containers/contents/tools/packaging/kernel/configs/fragments/${scope}?ref=${KATA_CONFIG_REF}"
+            while IFS=$'\t' read -r name download_url; do
+              curl --http1.1 --fail --location --retry 8 --retry-delay 2 \
+                --retry-all-errors "$download_url" \
+                --output "$fragments/$scope/$name"
+            done < <(gh api "$api" --jq '.[] | select(.type == "file" and (.name | endswith(".conf"))) | [.name, .download_url] | @tsv')
+          }
+
+          download_scope common
+          download_scope arm64
+          mapfile -t common_configs < <(grep -L '!arm64' "$fragments"/common/*.conf | sort)
+          mapfile -t arm64_configs < <(find "$fragments/arm64" -maxdepth 1 -name '*.conf' -print | sort)
+          test "${#common_configs[@]}" -gt 0
+          test "${#arm64_configs[@]}" -gt 0
+          (
+            cd "$kernel_tree"
+            scripts/kconfig/merge_config.sh -m \
+              "${common_configs[@]}" "${arm64_configs[@]}" "$GITHUB_WORKSPACE/config-aarch64"
+          )
 
       - name: Resolve Kconfig dependencies
-        working-directory: linux-6.12.59
         run: |
           set -eu
+          cd "linux-${KERNEL_VERSION}"
           make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
-          test "$(grep -E '^CONFIG_ARM64_16K_PAGES=y$' .config | wc -l)" -eq 1
-          test "$(grep -E '^# CONFIG_ARM64_4K_PAGES is not set$' .config | wc -l)" -eq 1
-          test "$(grep -E '^CONFIG_BLK_DEV_INITRD=y$' .config | wc -l)" -eq 1
-          test "$(grep -E '^CONFIG_RD_GZIP=y$' .config | wc -l)" -eq 1
+          for setting in \
+            CONFIG_ARM64_16K_PAGES=y \
+            CONFIG_BLK_DEV_INITRD=y \
+            CONFIG_RD_GZIP=y \
+            CONFIG_MEMORY_HOTPLUG=y \
+            CONFIG_MEMORY_HOTREMOVE=y \
+            CONFIG_CGROUPS=y \
+            CONFIG_MEMCG=y \
+            CONFIG_NAMESPACES=y \
+            CONFIG_SECCOMP=y \
+            CONFIG_SECCOMP_FILTER=y \
+            CONFIG_PREEMPT_DYNAMIC=y \
+            CONFIG_PSI=y \
+            CONFIG_LRU_GEN=y \
+            CONFIG_SECURITY_LANDLOCK=y \
+            CONFIG_SECURITY_SELINUX=y \
+            CONFIG_PCI=y \
+            CONFIG_VIRTIO_PCI=y \
+            CONFIG_VIRTIO_BLK=y \
+            CONFIG_VIRTIO_NET=y \
+            CONFIG_VIRTIO_CONSOLE=y \
+            CONFIG_HW_RANDOM_VIRTIO=y \
+            CONFIG_VSOCKETS=y \
+            CONFIG_VIRTIO_VSOCKETS=y \
+            CONFIG_VIRTIO_BALLOON=y \
+            CONFIG_VIRTIO_INPUT=y \
+            CONFIG_DRM_VIRTIO_GPU=y \
+            CONFIG_VIRTIO_FS=y \
+            CONFIG_USB=y \
+            CONFIG_USB_XHCI_HCD=y \
+            CONFIG_USB_XHCI_PCI=y \
+            CONFIG_USB_HID=y \
+            CONFIG_HID_GENERIC=y \
+            CONFIG_HIDRAW=y \
+            CONFIG_USB_STORAGE=y \
+            CONFIG_USB_UAS=y \
+            CONFIG_USB_ACM=y \
+            CONFIG_USB_PRINTER=y \
+            CONFIG_USB_SERIAL=y \
+            CONFIG_USB_SERIAL_GENERIC=y \
+            CONFIG_USB_SERIAL_CP210X=y \
+            CONFIG_USB_SERIAL_FTDI_SIO=y \
+            CONFIG_USB_SERIAL_PL2303=y \
+            CONFIG_USB_USBNET=y \
+            CONFIG_USB_NET_AX88179_178A=y \
+            CONFIG_USB_NET_CDCETHER=y \
+            CONFIG_USB_NET_CDC_NCM=y \
+            CONFIG_USB_NET_RNDIS_HOST=y \
+            CONFIG_USB_LAN78XX=y \
+            CONFIG_USB_NET_SMSC95XX=y \
+            CONFIG_USB_RTL8152=y \
+            CONFIG_USB_RTL8153_ECM=y \
+            CONFIG_SCSI=y \
+            CONFIG_BLK_DEV_SD=y \
+            CONFIG_BLK_DEV_SR=y \
+            CONFIG_CHR_DEV_SG=y \
+            CONFIG_EXT4_FS=y \
+            CONFIG_BTRFS_FS=y \
+            CONFIG_XFS_FS=y \
+            CONFIG_F2FS_FS=y \
+            CONFIG_NTFS3_FS=y \
+            CONFIG_EXFAT_FS=y \
+            CONFIG_MSDOS_FS=y \
+            CONFIG_VFAT_FS=y \
+            CONFIG_ISO9660_FS=y \
+            CONFIG_UDF_FS=y \
+            CONFIG_EROFS_FS=y \
+            CONFIG_SQUASHFS=y \
+            CONFIG_NFS_FS=y \
+            CONFIG_CIFS=y \
+            CONFIG_9P_FS=y \
+            CONFIG_AUTOFS_FS=y \
+            CONFIG_FUSE_FS=y \
+            CONFIG_OVERLAY_FS=y \
+            CONFIG_OVERLAY_FS_INDEX=y \
+            CONFIG_OVERLAY_FS_XINO_AUTO=y \
+            CONFIG_TMPFS_POSIX_ACL=y \
+            CONFIG_NET_NS=y \
+            CONFIG_VETH=y \
+            CONFIG_TUN=y \
+            CONFIG_TAP=y \
+            CONFIG_BRIDGE=y \
+            CONFIG_VLAN_8021Q=y \
+            CONFIG_MACVLAN=y \
+            CONFIG_MACVTAP=y \
+            CONFIG_IPVLAN=y \
+            CONFIG_VXLAN=y \
+            CONFIG_GENEVE=y \
+            CONFIG_NET_VRF=y \
+            CONFIG_NF_TABLES=y \
+            CONFIG_IP_VS=y \
+            CONFIG_NET_SCH_FQ_CODEL=y \
+            CONFIG_NET_CLS_FLOWER=y \
+            CONFIG_WIREGUARD=y; do
+            grep -Fxq "$setting" .config || {
+              echo "Required LightHouse setting missing: $setting" >&2
+              exit 1
+            }
+          done
+          grep -Fxq '# CONFIG_ARM64_4K_PAGES is not set' .config
+          grep -Fxq '# CONFIG_MODULES is not set' .config
+          grep -Fxq 'CONFIG_LSM="landlock,yama,integrity,apparmor,selinux"' .config
+          for setting in \
+            '# CONFIG_SOUND is not set' \
+            '# CONFIG_MEDIA_SUPPORT is not set' \
+            '# CONFIG_MMC is not set' \
+            '# CONFIG_MTD is not set' \
+            '# CONFIG_ATA is not set' \
+            '# CONFIG_IOMMU_SUPPORT is not set' \
+            '# CONFIG_GPIOLIB is not set' \
+            '# CONFIG_PINCTRL is not set' \
+            '# CONFIG_SPI is not set' \
+            '# CONFIG_ACPI_I2C_OPREGION is not set' \
+            '# CONFIG_ACPI_PRMT is not set' \
+            '# CONFIG_PMIC_OPREGION is not set' \
+            '# CONFIG_HW_RANDOM_ARM_SMCCC_TRNG is not set' \
+            '# CONFIG_CRYPTO_HW is not set' \
+            '# CONFIG_DEVMEM is not set' \
+            '# CONFIG_UEVENT_HELPER is not set' \
+            '# CONFIG_HWMON is not set' \
+            '# CONFIG_NVMEM is not set' \
+            '# CONFIG_WATCHDOG is not set' \
+            '# CONFIG_REGULATOR is not set' \
+            '# CONFIG_IIO is not set'; do
+            grep -Fxq "$setting" .config || {
+              echo "A VZ-unreachable device class was enabled: $setting" >&2
+              exit 1
+            }
+          done
           if grep -E '^CONFIG_[A-Za-z0-9_]+=m$' .config; then
             echo 'The LightHouse kernel must not leave retained features as modules.' >&2
             exit 1
           fi
-          # VZ supplies virtio devices; these physical PCI storage paths must stay off.
-          if grep -E '^CONFIG_(SCSI_(HPSA|HISI_SAS|SMARTPQI|VIRTIO)|ATA=y|SATA_|PATA_|NVME_|BLK_DEV_NVME)=y$' .config; then
+          # The guest only sees VZ/NativePipe virtio devices plus explicitly
+          # supported USB pass-through classes. Reject unreachable hardware.
+          if grep -E '^CONFIG_(SCSI_(HPSA|HISI_SAS|SMARTPQI|VIRTIO)|ATA|SATA_[A-Za-z0-9_]+|PATA_[A-Za-z0-9_]+|NVME_[A-Za-z0-9_]+|BLK_DEV_NVME)=y$' .config; then
             echo 'A VZ-absent SCSI/SATA/NVMe driver is enabled.' >&2
             exit 1
           fi
+          if grep -E '^CONFIG_(ARCH_(EXYNOS|HISI|QCOM|SEATTLE|SYNQUACER|THUNDER|THUNDER2|VEXPRESS)|KVM[A-Za-z0-9_]*|VIRTIO_(MEM|MMIO[A-Za-z0-9_]*|PCI_LEGACY|PMEM)|NET_9P_VIRTIO|CRYPTO_DEV_(CAVIUM_ZIP|QCE[A-Za-z0-9_]*|QCOM_RNG|VIRTIO|HISI_SEC[A-Za-z0-9_]*)|SERIAL_(8250[A-Za-z0-9_]*|AMBA_PL011[A-Za-z0-9_]*|SAMSUNG[A-Za-z0-9_]*)|HW_RANDOM_(HISI|HISTB|CAVIUM|EXYNOS|CN10K|TPM)|RTC_DRV_(DS3232[A-Za-z0-9_]*|S3C)|PTP_1588_CLOCK_(KVM|VMCLOCK)|PCI_(STUB|ATS|IOV|PRI|PASID)|VFIO[A-Za-z0-9_]*|VDPA[A-Za-z0-9_]*|VHOST[A-Za-z0-9_]*|IOMMU_SUPPORT|LIBNVDIMM|NVDIMM[A-Za-z0-9_]*|NET_VENDOR_[A-Za-z0-9_]+)=y$' .config; then
+            echo 'A device outside the VZ/NativePipe/USB hardware contract is enabled.' >&2
+            exit 1
+          fi
+          printf 'Resolved config: %s built-ins, 0 modules\n' \
+            "$(grep -Ec '^CONFIG_[A-Za-z0-9_]+=y$' .config)"
 
       - name: Build kernel
-        working-directory: linux-6.12.59
         run: |
+          cd "linux-${KERNEL_VERSION}"
           make -j"$(nproc)" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" Image
 
       - name: Package kernel and metadata
@@ -244,7 +417,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lighthouse-linux-6.12.59-arm64-16k
+          name: lighthouse-linux-arm64-16k
           path: artifact/*
           if-no-files-found: error
 
@@ -257,7 +430,7 @@ jobs:
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: lighthouse-linux-6.12.59-arm64-16k
+          name: lighthouse-linux-arm64-16k
           path: release
 
       - name: Publish release
@@ -267,9 +440,9 @@ jobs:
           draft: false
           generate_release_notes: true
           files: |
-            release/lighthouse-linux-6.12.59-arm64-16k.tar.gz
-            release/lighthouse-linux-6.12.59-arm64-16k.Image
-            release/lighthouse-initramfs-6.12.59-arm64.img
+            release/lighthouse-linux-*-arm64-16k.tar.gz
+            release/lighthouse-linux-*-arm64-16k.Image
+            release/lighthouse-initramfs-*-arm64.img
             release/config-aarch64
             release/System.map
             release/SHA256SUMS

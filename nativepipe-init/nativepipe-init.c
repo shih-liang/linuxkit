@@ -24,7 +24,9 @@
 #define NP_INIT_PORT 1024u
 #define NP_FRAME_HEADER_SIZE 12u
 #define NP_MAX_PAYLOAD (8u * 1024u * 1024u)
+#define NP_MEMORY_ALIGNMENT_BYTES (UINT64_C(1024) * UINT64_C(1024))
 #define NP_PAYLOAD_ROOT "/run/nativepipe/payload"
+#define NP_TARGET_MEMORY_PATH "/run/nativepipe/target-memory-bytes"
 #define NP_NEW_ROOT "/newroot"
 
 enum np_action {
@@ -153,6 +155,23 @@ static int write_full(int fd, const void *buffer, size_t length) {
         return -1;
     }
     return 0;
+}
+
+static int publish_target_memory(uint64_t bytes) {
+    char value[32];
+    int length = snprintf(value, sizeof(value), "%llu\n", (unsigned long long)bytes);
+    if (length <= 0 || (size_t)length >= sizeof(value)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    int fd = open(NP_TARGET_MEMORY_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return -1;
+    int result = write_full(fd, value, (size_t)length);
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    return result;
 }
 
 static uint16_t read_le16(const uint8_t *bytes) {
@@ -901,39 +920,11 @@ static int dispatch_request(int connection, const uint8_t *payload, size_t lengt
     return result;
 }
 
-static int self_test(void) {
-    uint8_t payload[] = {
-        'N', 'P', 'I', 'C', 1, 0, 0, 0, 0, 0, 0, 0,
-        NP_ACTION_INSTALL, 1, 0, 0,
-        15, 0, 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '-', 'r', 'o', 'o', 't',
-        0, 0,
-        18, 0, 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '-', 'i', 'n', 's', 't', 'a', 'l', 'l',
-        34, 0, '/', 'r', 'u', 'n', '/', 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '/', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '/', 'a', 'd', 'a', 'p', 't', 'e', 'r', '.', 's', 'h',
-        30, 0, '/', 'r', 'u', 'n', '/', 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '/', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '/', 's', 'o', 'u', 'r', 'c', 'e',
-    };
-    struct np_plan plan;
-    return decode_plan(payload, sizeof(payload), &plan) == 0 &&
-                   plan.action == NP_ACTION_INSTALL && plan.automatic &&
-                   strcmp(plan.disk_identifier, "nativepipe-root") == 0
-               ? 0
-               : 1;
-}
-
-static int read_boot_configuration(bool *maintenance, char *root, size_t root_capacity) {
+static int parse_boot_configuration(char *command_line, bool *maintenance, char *root,
+                                    size_t root_capacity, uint64_t *target_memory) {
     *maintenance = false;
+    *target_memory = 0;
     root[0] = '\0';
-    int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return -1;
-    char command_line[4096];
-    ssize_t count = read(fd, command_line, sizeof(command_line) - 1);
-    int saved = errno;
-    close(fd);
-    if (count < 0) {
-        errno = saved;
-        return -1;
-    }
-    command_line[count] = '\0';
     char *save = NULL;
     for (char *token = strtok_r(command_line, " \t\r\n", &save); token;
          token = strtok_r(NULL, " \t\r\n", &save)) {
@@ -946,9 +937,75 @@ static int read_boot_configuration(bool *maintenance, char *root, size_t root_ca
                 return -1;
             }
             memcpy(root, token + 5, length + 1);
+        } else if (!strncmp(token, "nativepipe.memory_target_bytes=", 31)) {
+            const char *value = token + 31;
+            if (*value < '0' || *value > '9') {
+                errno = EINVAL;
+                return -1;
+            }
+            char *end = NULL;
+            errno = 0;
+            unsigned long long parsed = strtoull(value, &end, 10);
+            if (errno || !end || *end || parsed == 0 ||
+                parsed % NP_MEMORY_ALIGNMENT_BYTES != 0) {
+                errno = EINVAL;
+                return -1;
+            }
+            *target_memory = (uint64_t)parsed;
         }
     }
     return 0;
+}
+
+static int self_test(void) {
+    uint8_t payload[] = {
+        'N', 'P', 'I', 'C', 1, 0, 0, 0, 0, 0, 0, 0,
+        NP_ACTION_INSTALL, 1, 0, 0,
+        15, 0, 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '-', 'r', 'o', 'o', 't',
+        0, 0,
+        18, 0, 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '-', 'i', 'n', 's', 't', 'a', 'l', 'l',
+        34, 0, '/', 'r', 'u', 'n', '/', 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '/', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '/', 'a', 'd', 'a', 'p', 't', 'e', 'r', '.', 's', 'h',
+        30, 0, '/', 'r', 'u', 'n', '/', 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '/', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '/', 's', 'o', 'u', 'r', 'c', 'e',
+    };
+    struct np_plan plan;
+    if (decode_plan(payload, sizeof(payload), &plan) != 0 ||
+        plan.action != NP_ACTION_INSTALL || !plan.automatic ||
+        strcmp(plan.disk_identifier, "nativepipe-root") != 0)
+        return 1;
+
+    char valid[] = "console=hvc0 root=/dev/vda2 nativepipe.memory_target_bytes=2147483648";
+    char root[256];
+    bool maintenance = false;
+    uint64_t target_memory = 0;
+    if (parse_boot_configuration(valid, &maintenance, root, sizeof(root), &target_memory) < 0 ||
+        maintenance || strcmp(root, "/dev/vda2") || target_memory != UINT64_C(2147483648))
+        return 1;
+
+    char invalid[] = "nativepipe.memory_target_bytes=not-a-number";
+    if (parse_boot_configuration(invalid, &maintenance, root, sizeof(root), &target_memory) >= 0)
+        return 1;
+    char unaligned[] = "nativepipe.memory_target_bytes=1048577";
+    return parse_boot_configuration(unaligned, &maintenance, root, sizeof(root), &target_memory) < 0
+               ? 0
+               : 1;
+}
+
+static int read_boot_configuration(bool *maintenance, char *root, size_t root_capacity,
+                                   uint64_t *target_memory) {
+    int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    char command_line[4096];
+    ssize_t count = read(fd, command_line, sizeof(command_line) - 1);
+    int saved = errno;
+    close(fd);
+    if (count < 0) {
+        errno = saved;
+        return -1;
+    }
+    command_line[count] = '\0';
+    return parse_boot_configuration(
+        command_line, maintenance, root, root_capacity, target_memory);
 }
 
 int main(int argc, char **argv) {
@@ -956,13 +1013,17 @@ int main(int argc, char **argv) {
         return self_test();
     setup_runtime();
     bool maintenance = false;
+    uint64_t target_memory = 0;
     struct np_plan boot_plan;
     memset(&boot_plan, 0, sizeof(boot_plan));
-    if (read_boot_configuration(&maintenance, boot_plan.root, sizeof(boot_plan.root)) < 0) {
+    if (read_boot_configuration(
+            &maintenance, boot_plan.root, sizeof(boot_plan.root), &target_memory) < 0) {
         log_errno("read kernel command line");
         for (;;)
             pause();
     }
+    if (target_memory && publish_target_memory(target_memory) < 0)
+        log_errno("publish target memory");
     if (!maintenance) {
         if (!valid_root(boot_plan.root)) {
             logmsg("normal boot requires an explicit root= kernel argument");

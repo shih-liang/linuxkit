@@ -7,6 +7,13 @@ boot it mounts the explicit kernel `root=` at `/newroot` and immediately runs
 `/run`, and `/tmp`, then waits for a host request. It never guesses a disk and
 never enters a shell automatically.
 
+For direct LightHouse boots, the host also supplies
+`nativepipe.memory_target_bytes=<bytes>`. PID 1 validates the decimal value and
+writes it to `/run/nativepipe/target-memory-bytes`; `/run` is then moved into
+the real root. The value is informational inside the guest. The host applies
+the same value to Virtualization.framework's memory-balloon device after the
+VM starts, which is the operation that actually changes the guest allowance.
+
 The process listens on virtio-vsock port 1024, the same control endpoint used
 by the installed `nativepipe-guestd`. Both stages use version-1 `NPIP` frames,
 little-endian request IDs, and the same `NPOK`/`NPER`, `NPRE`/`NPFL`/`NPLS`,
