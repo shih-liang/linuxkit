@@ -1,9 +1,12 @@
 #define _GNU_SOURCE
 
+#include <ctype.h>
 #include <dirent.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,6 +31,15 @@
 #define NP_PAYLOAD_ROOT "/run/nativepipe/payload"
 #define NP_TARGET_MEMORY_PATH "/run/nativepipe/target-memory-bytes"
 #define NP_NEW_ROOT "/newroot"
+#define NP_DEFAULT_ROOT_WAIT_MILLISECONDS UINT64_C(5000)
+
+#if defined(__aarch64__)
+#define NP_ELF_MACHINE EM_AARCH64
+#elif defined(__x86_64__)
+#define NP_ELF_MACHINE EM_X86_64
+#else
+#error "nativepipe-init executable preflight needs the target ELF machine"
+#endif
 
 enum np_action {
     NP_ACTION_BOOT = 0,
@@ -40,9 +52,16 @@ struct np_plan {
     uint64_t request_id;
     enum np_action action;
     bool automatic;
+    bool root_read_only;
+    bool root_wait;
+    uint32_t root_wait_seconds;
+    uint32_t root_delay_seconds;
     char disk_identifier[21];
     char disk[256];
     char root[256];
+    char root_fstype[64];
+    char root_flags[512];
+    char init[256];
     char payload_tag[64];
     char adapter[256];
     char source[256];
@@ -60,18 +79,20 @@ struct buffer {
     size_t capacity;
 };
 
-static int control_listener = -1;
 static int control_connection = -1;
+
+static void initialize_plan(struct np_plan *plan) {
+    memset(plan, 0, sizeof(*plan));
+    /* Linux's standard root mount default is read-only unless `rw` is set. */
+    plan->root_read_only = true;
+    memcpy(plan->init, "/sbin/init", sizeof("/sbin/init"));
+}
 
 static void close_control_transport(void) {
     if (control_connection >= 0) {
         shutdown(control_connection, SHUT_RDWR);
         close(control_connection);
         control_connection = -1;
-    }
-    if (control_listener >= 0) {
-        close(control_listener);
-        control_listener = -1;
     }
 }
 
@@ -217,18 +238,6 @@ static bool has_parent_component(const char *path) {
            (strlen(path) >= 3 && strcmp(path + strlen(path) - 3, "/..") == 0);
 }
 
-static bool valid_root(const char *root) {
-    return (strncmp(root, "/dev/", 5) == 0 && !has_parent_component(root)) ||
-           strncmp(root, "UUID=", 5) == 0 || strncmp(root, "PARTUUID=", 9) == 0 ||
-           strncmp(root, "LABEL=", 6) == 0;
-}
-
-static bool valid_payload_path(const char *path) {
-    size_t prefix = strlen(NP_PAYLOAD_ROOT);
-    return strncmp(path, NP_PAYLOAD_ROOT "/", prefix + 1) == 0 &&
-           !has_parent_component(path);
-}
-
 static bool valid_token(const char *value, size_t maximum) {
     size_t length = strlen(value);
     if (!length || length > maximum)
@@ -240,8 +249,62 @@ static bool valid_token(const char *value, size_t maximum) {
     return true;
 }
 
+static bool valid_root(const char *root) {
+    if (strncmp(root, "/dev/", 5) == 0)
+        return !has_parent_component(root) && valid_token(root, 255);
+    const char *value = NULL;
+    if (strncmp(root, "UUID=", 5) == 0)
+        value = root + 5;
+    else if (strncmp(root, "PARTUUID=", 9) == 0)
+        value = root + 9;
+    else if (strncmp(root, "PARTLABEL=", 10) == 0)
+        value = root + 10;
+    else if (strncmp(root, "LABEL=", 6) == 0)
+        value = root + 6;
+    return value && valid_token(value, 246);
+}
+
+static bool valid_fstype(const char *value) {
+    size_t length = strlen(value);
+    if (!length || length >= sizeof(((struct np_plan *)0)->root_fstype))
+        return false;
+    bool component = false;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p == ',') {
+            if (!component)
+                return false;
+            component = false;
+        } else if (isalnum(*p) || *p == '_' || *p == '-' || *p == '.') {
+            component = true;
+        } else {
+            return false;
+        }
+    }
+    return component;
+}
+
+static bool valid_root_flags(const char *value) {
+    if (strlen(value) >= sizeof(((struct np_plan *)0)->root_flags))
+        return false;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p < 0x21 || *p > 0x7e)
+            return false;
+    }
+    return true;
+}
+
+static bool valid_init(const char *path) {
+    return path[0] == '/' && !has_parent_component(path) && valid_token(path, 255);
+}
+
+static bool valid_payload_path(const char *path) {
+    size_t prefix = strlen(NP_PAYLOAD_ROOT);
+    return strncmp(path, NP_PAYLOAD_ROOT "/", prefix + 1) == 0 &&
+           !has_parent_component(path);
+}
+
 static int decode_plan(const uint8_t *payload, size_t length, struct np_plan *plan) {
-    memset(plan, 0, sizeof(*plan));
+    initialize_plan(plan);
     if (length < 16 || memcmp(payload, "NPIC", 4) != 0)
         return -1;
     struct reader reader = {payload, length, 4};
@@ -379,21 +442,20 @@ static int send_error(int connection, uint64_t request_id, int code, const char 
     return result;
 }
 
-static int listen_for_host(void) {
-    int listener = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (listener < 0)
+static int connect_to_host(void) {
+    int connection = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (connection < 0)
         return -1;
     struct sockaddr_vm address;
     memset(&address, 0, sizeof(address));
     address.svm_family = AF_VSOCK;
-    address.svm_cid = VMADDR_CID_ANY;
+    address.svm_cid = VMADDR_CID_HOST;
     address.svm_port = NP_INIT_PORT;
-    if (bind(listener, (struct sockaddr *)&address, sizeof(address)) < 0 ||
-        listen(listener, 4) < 0) {
-        close(listener);
+    if (connect(connection, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        close(connection);
         return -1;
     }
-    return listener;
+    return connection;
 }
 
 static int run(char *const arguments[]) {
@@ -410,6 +472,88 @@ static int run(char *const arguments[]) {
             return -1;
     }
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int run_capture_line(char *const arguments[], char *output, size_t capacity) {
+    int descriptors[2];
+    if (capacity < 2 || pipe2(descriptors, O_CLOEXEC) < 0)
+        return -1;
+    pid_t child = fork();
+    if (child < 0) {
+        close(descriptors[0]);
+        close(descriptors[1]);
+        return -1;
+    }
+    if (child == 0) {
+        close(descriptors[0]);
+        if (dup2(descriptors[1], STDOUT_FILENO) < 0)
+            _exit(127);
+        close(descriptors[1]);
+        execv(arguments[0], arguments);
+        _exit(127);
+    }
+    close(descriptors[1]);
+    size_t used = 0;
+    bool overflow = false;
+    for (;;) {
+        char bytes[256];
+        ssize_t count = read(descriptors[0], bytes, sizeof(bytes));
+        if (count > 0) {
+            size_t available = capacity - 1 - used;
+            size_t copy = (size_t)count < available ? (size_t)count : available;
+            memcpy(output + used, bytes, copy);
+            used += copy;
+            overflow |= copy != (size_t)count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count < 0)
+            overflow = true;
+        break;
+    }
+    close(descriptors[0]);
+    output[used] = '\0';
+
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR)
+            return -1;
+    }
+    if (overflow) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        errno = ENODEV;
+        return -1;
+    }
+    output[strcspn(output, "\r\n")] = '\0';
+    if (!output[0]) {
+        errno = ENODEV;
+        return -1;
+    }
+    return 0;
+}
+
+static int resolve_root_device(const char *root, char *device, size_t capacity) {
+    if (strncmp(root, "/dev/", 5) == 0) {
+        if (snprintf(device, capacity, "%s", root) >= (int)capacity) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        return 0;
+    }
+    char *const arguments[] = {
+        "/sbin/blkid", "-l", "-t", (char *)root, "-o", "device", NULL,
+    };
+    if (run_capture_line(arguments, device, capacity) < 0)
+        return -1;
+    if (strncmp(device, "/dev/", 5) != 0 || !valid_root(device)) {
+        errno = ENODEV;
+        return -1;
+    }
+    return 0;
 }
 
 static int resolve_disk_identifier(struct np_plan *plan) {
@@ -770,52 +914,303 @@ static int write_path(const uint8_t *payload, size_t length) {
     return result;
 }
 
-static int mount_root(const struct np_plan *plan) {
-    if (root_is_mounted())
+static void sleep_milliseconds(uint64_t milliseconds) {
+    struct timespec delay = {
+        .tv_sec = (time_t)(milliseconds / 1000),
+        .tv_nsec = (long)((milliseconds % 1000) * 1000000),
+    };
+    while (nanosleep(&delay, &delay) < 0 && errno == EINTR) {}
+}
+
+static uint64_t monotonic_milliseconds(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
         return 0;
-    if (!plan->root[0]) {
-        errno = ENOENT;
+    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
+
+static int mount_root(const struct np_plan *plan) {
+    if (root_is_mounted()) {
+        /* An adapter may deliberately leave its root mounted and omit root=.
+         * An explicit root= is different: always remount that exact device so
+         * a failed earlier attempt cannot make a later boot use stale state. */
+        if (!plan->root[0])
+            return 0;
+        if (umount2(NP_NEW_ROOT, 0) < 0)
+            return -1;
+    }
+    if (!valid_root(plan->root)) {
+        errno = EINVAL;
         return -1;
     }
-    char *const arguments[] = {
-        "/bin/mount", "-o", "rw", (char *)plan->root, NP_NEW_ROOT, NULL,
-    };
-    for (unsigned attempt = 0; attempt < 300; attempt++) {
-        if (run(arguments) == 0)
-            return 0;
-        struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000000};
-        nanosleep(&delay, NULL);
+    if (plan->root_delay_seconds)
+        sleep_milliseconds((uint64_t)plan->root_delay_seconds * 1000);
+
+    const uint64_t started = monotonic_milliseconds();
+    const uint64_t limit = plan->root_wait
+        ? (plan->root_wait_seconds ? (uint64_t)plan->root_wait_seconds * 1000 : UINT64_MAX)
+        : NP_DEFAULT_ROOT_WAIT_MILLISECONDS;
+    for (;;) {
+        char device[256];
+        if (resolve_root_device(plan->root, device, sizeof(device)) == 0) {
+            char options[sizeof(plan->root_flags) + 4];
+            int option_length = snprintf(
+                options, sizeof(options), "%s%s%s",
+                plan->root_read_only ? "ro" : "rw",
+                plan->root_flags[0] ? "," : "", plan->root_flags);
+            if (option_length < 0 || (size_t)option_length >= sizeof(options)) {
+                errno = EOVERFLOW;
+                return -1;
+            }
+            char *arguments[9];
+            size_t index = 0;
+            arguments[index++] = "/bin/mount";
+            if (plan->root_fstype[0]) {
+                arguments[index++] = "-t";
+                arguments[index++] = (char *)plan->root_fstype;
+            }
+            arguments[index++] = "-o";
+            arguments[index++] = options;
+            arguments[index++] = device;
+            arguments[index++] = NP_NEW_ROOT;
+            arguments[index] = NULL;
+            if (run(arguments) == 0)
+                return 0;
+        }
+
+        uint64_t now = monotonic_milliseconds();
+        if (limit != UINT64_MAX && now - started >= limit)
+            break;
+        sleep_milliseconds(100);
     }
     errno = ENODEV;
     return -1;
 }
 
-static int switch_to_root(const struct np_plan *plan) {
-    if (mount_root(plan) != 0 || access(NP_NEW_ROOT "/sbin/init", X_OK) < 0)
+static int open_in_target_root(int root, const char *path, int flags) {
+    if (!valid_init(path)) {
+        errno = EINVAL;
         return -1;
-    make_directory(NP_NEW_ROOT "/dev", 0755);
-    make_directory(NP_NEW_ROOT "/proc", 0555);
-    make_directory(NP_NEW_ROOT "/sys", 0555);
-    make_directory(NP_NEW_ROOT "/run", 0755);
-    mount("/dev", NP_NEW_ROOT "/dev", NULL, MS_MOVE, NULL);
-    mount("/proc", NP_NEW_ROOT "/proc", NULL, MS_MOVE, NULL);
-    mount("/sys", NP_NEW_ROOT "/sys", NULL, MS_MOVE, NULL);
-    mount("/run", NP_NEW_ROOT "/run", NULL, MS_MOVE, NULL);
-    close_control_transport();
-    char *const arguments[] = {
-        "/sbin/switch_root", "-c", "/dev/console", NP_NEW_ROOT, "/sbin/init", NULL,
+    }
+    struct open_how how = {
+        .flags = (uint64_t)flags,
+        .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
     };
-    execv(arguments[0], arguments);
-    log_errno("exec installed init");
-    for (;;)
-        pause();
+    return (int)syscall(SYS_openat2, root, path + 1, &how, sizeof(how));
 }
 
-static int execute_plan(struct np_plan *plan) {
-    if (plan->action == NP_ACTION_SHELL) {
-        char *const arguments[] = {"/bin/sh", "-l", NULL};
-        return run(arguments);
+static int preflight_executable_at(int root, const char *path, unsigned depth) {
+    if (depth > 2) {
+        errno = ELOOP;
+        return -1;
     }
+    int fd = open_in_target_root(root, path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    struct stat status;
+    if (fstat(fd, &status) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    if (!S_ISREG(status.st_mode) ||
+        !(status.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+        close(fd);
+        errno = EACCES;
+        return -1;
+    }
+
+    uint8_t header[sizeof(Elf64_Ehdr)];
+    ssize_t count = pread(fd, header, sizeof(header), 0);
+    if (count >= 2 && header[0] == '#' && header[1] == '!') {
+        char line[256];
+        count = pread(fd, line, sizeof(line) - 1, 0);
+        close(fd);
+        if (count < 3) {
+            errno = ENOEXEC;
+            return -1;
+        }
+        line[count] = '\0';
+        char *interpreter = line + 2;
+        while (*interpreter == ' ' || *interpreter == '\t')
+            interpreter++;
+        char *end = interpreter;
+        while (*end && *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n')
+            end++;
+        *end = '\0';
+        return preflight_executable_at(root, interpreter, depth + 1);
+    }
+    if (count != (ssize_t)sizeof(header) || memcmp(header, ELFMAG, SELFMAG) != 0 ||
+        header[EI_CLASS] != ELFCLASS64 || header[EI_DATA] != ELFDATA2LSB ||
+        header[EI_VERSION] != EV_CURRENT) {
+        close(fd);
+        errno = ENOEXEC;
+        return -1;
+    }
+
+    Elf64_Ehdr executable;
+    memcpy(&executable, header, sizeof(executable));
+    if ((executable.e_type != ET_EXEC && executable.e_type != ET_DYN) ||
+        executable.e_machine != NP_ELF_MACHINE || executable.e_version != EV_CURRENT ||
+        executable.e_ehsize != sizeof(Elf64_Ehdr) ||
+        executable.e_phentsize != sizeof(Elf64_Phdr) || !executable.e_phnum ||
+        executable.e_phnum > 128 || executable.e_phoff > (uint64_t)status.st_size) {
+        close(fd);
+        errno = ENOEXEC;
+        return -1;
+    }
+    bool has_load_segment = false;
+    char interpreter[256] = {0};
+    for (Elf64_Half index = 0; index < executable.e_phnum; index++) {
+        uint64_t relative_offset = (uint64_t)index * sizeof(Elf64_Phdr);
+        if (relative_offset > (uint64_t)status.st_size - executable.e_phoff ||
+            sizeof(Elf64_Phdr) >
+                (uint64_t)status.st_size - executable.e_phoff - relative_offset) {
+            close(fd);
+            errno = ENOEXEC;
+            return -1;
+        }
+        uint64_t offset = executable.e_phoff + relative_offset;
+        Elf64_Phdr segment;
+        if (pread(fd, &segment, sizeof(segment), (off_t)offset) != (ssize_t)sizeof(segment)) {
+            int saved = errno ? errno : EIO;
+            close(fd);
+            errno = saved;
+            return -1;
+        }
+        if (segment.p_type == PT_LOAD) {
+            if (segment.p_filesz > segment.p_memsz ||
+                segment.p_offset > (uint64_t)status.st_size ||
+                segment.p_filesz > (uint64_t)status.st_size - segment.p_offset) {
+                close(fd);
+                errno = ENOEXEC;
+                return -1;
+            }
+            has_load_segment = true;
+            continue;
+        }
+        if (segment.p_type != PT_INTERP)
+            continue;
+        if (interpreter[0] || segment.p_filesz < 2 ||
+            segment.p_filesz > sizeof(interpreter) ||
+            segment.p_offset > (uint64_t)status.st_size ||
+            segment.p_filesz > (uint64_t)status.st_size - segment.p_offset ||
+            pread(fd, interpreter, (size_t)segment.p_filesz, (off_t)segment.p_offset) !=
+                (ssize_t)segment.p_filesz ||
+            interpreter[segment.p_filesz - 1] != '\0') {
+            close(fd);
+            errno = ENOEXEC;
+            return -1;
+        }
+    }
+    close(fd);
+    if (!has_load_segment) {
+        errno = ENOEXEC;
+        return -1;
+    }
+    return interpreter[0] ? preflight_executable_at(root, interpreter, depth + 1) : 0;
+}
+
+static int preflight_target_init(const struct np_plan *plan) {
+    int root = open(NP_NEW_ROOT, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (root < 0)
+        return -1;
+    int result = preflight_executable_at(root, plan->init, 0);
+    close(root);
+    return result;
+}
+
+static int preflight_switch_root(void) {
+    int root = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (root < 0)
+        return -1;
+    int result = preflight_executable_at(root, "/sbin/switch_root", 0);
+    close(root);
+    return result;
+}
+
+struct runtime_mount {
+    const char *source;
+    const char *target;
+    mode_t mode;
+};
+
+static const struct runtime_mount runtime_mounts[] = {
+    {"/dev", NP_NEW_ROOT "/dev", 0755},
+    {"/proc", NP_NEW_ROOT "/proc", 0555},
+    {"/sys", NP_NEW_ROOT "/sys", 0555},
+    {"/run", NP_NEW_ROOT "/run", 0755},
+};
+
+static int prepare_runtime_mounts(void) {
+    for (size_t index = 0; index < sizeof(runtime_mounts) / sizeof(runtime_mounts[0]); index++) {
+        const struct runtime_mount *item = &runtime_mounts[index];
+        if (mkdir(item->target, item->mode) < 0 && errno != EEXIST)
+            return -1;
+        struct stat status;
+        if (lstat(item->target, &status) < 0 || !S_ISDIR(status.st_mode)) {
+            errno = ENOTDIR;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void rollback_runtime_mounts(size_t moved) {
+    while (moved) {
+        const struct runtime_mount *item = &runtime_mounts[--moved];
+        if (mount(item->target, item->source, NULL, MS_MOVE, NULL) < 0)
+            log_errno("rollback runtime mount");
+    }
+}
+
+static int move_runtime_mounts(size_t *moved) {
+    *moved = 0;
+    for (size_t index = 0; index < sizeof(runtime_mounts) / sizeof(runtime_mounts[0]); index++) {
+        const struct runtime_mount *item = &runtime_mounts[index];
+        if (mount(item->source, item->target, NULL, MS_MOVE, NULL) < 0) {
+            rollback_runtime_mounts(*moved);
+            return -1;
+        }
+        (*moved)++;
+    }
+    return 0;
+}
+
+static int switch_to_root(
+    const struct np_plan *plan, int acknowledgement_connection, bool *response_sent
+) {
+    if (response_sent)
+        *response_sent = false;
+    if (mount_root(plan) < 0 || preflight_target_init(plan) < 0 ||
+        preflight_switch_root() < 0 || prepare_runtime_mounts() < 0)
+        return -1;
+    size_t moved = 0;
+    if (move_runtime_mounts(&moved) < 0)
+        return -1;
+    if (acknowledgement_connection >= 0) {
+        if (send_ack(acknowledgement_connection, plan->request_id) < 0) {
+            rollback_runtime_mounts(moved);
+            return -1;
+        }
+        if (response_sent)
+            *response_sent = true;
+    }
+
+    close_control_transport();
+    char *const arguments[] = {
+        "/sbin/switch_root", "-c", "/dev/console", NP_NEW_ROOT, (char *)plan->init, NULL,
+    };
+    execv(arguments[0], arguments);
+    int saved = errno;
+    rollback_runtime_mounts(moved);
+    errno = saved;
+    log_errno("exec switch_root");
+    return -1;
+}
+
+static int prepare_plan(struct np_plan *plan) {
     if (plan->action == NP_ACTION_INSTALL || plan->action == NP_ACTION_REPAIR) {
         if (resolve_disk_identifier(plan) < 0) {
             log_errno("target disk identifier not found");
@@ -826,17 +1221,32 @@ static int execute_plan(struct np_plan *plan) {
         const char *action = plan->action == NP_ACTION_INSTALL ? "install" : "repair";
         if (run_adapter(plan, action) != 0) {
             logmsg("adapter failed; waiting for another host command");
+            errno = EIO;
             return -1;
         }
     }
-    if (switch_to_root(plan) < 0) {
+    return 0;
+}
+
+static int execute_plan(struct np_plan *plan, int connection, bool *response_sent) {
+    *response_sent = false;
+    if (plan->action == NP_ACTION_SHELL) {
+        if (send_ack(connection, plan->request_id) < 0)
+            return -1;
+        *response_sent = true;
+        char *const arguments[] = {"/bin/sh", "-l", NULL};
+        return run(arguments);
+    }
+    if (prepare_plan(plan) < 0)
+        return -1;
+    if (switch_to_root(plan, connection, response_sent) < 0) {
         logmsg("root handoff failed; waiting for another host command");
         return -1;
     }
     return 0;
 }
 
-static int send_hello(int connection, uint64_t request_id) {
+static int append_guest_info(struct buffer *response) {
     struct utsname system;
     const char *release = uname(&system) == 0 ? system.release : "";
     const char *fields[] = {
@@ -845,25 +1255,44 @@ static int send_hello(int connection, uint64_t request_id) {
     const char *capabilities[] = {
         "init.control", "init.mount", "init.execute", "fs.read", "fs.stat", "fs.write",
     };
-    struct buffer response = {0};
-    if (append(&response, "NPIF", 4) < 0 || append_u64(&response, request_id) < 0)
-        goto failure;
     for (size_t index = 0; index < sizeof(fields) / sizeof(fields[0]); index++) {
-        if (append_string(&response, fields[index]) < 0)
-            goto failure;
+        if (append_string(response, fields[index]) < 0)
+            return -1;
     }
-    if (append_u16(&response, (uint16_t)(sizeof(capabilities) / sizeof(capabilities[0]))) < 0)
-        goto failure;
+    if (append_u16(response, (uint16_t)(sizeof(capabilities) / sizeof(capabilities[0]))) < 0)
+        return -1;
     for (size_t index = 0; index < sizeof(capabilities) / sizeof(capabilities[0]); index++) {
-        if (append_string(&response, capabilities[index]) < 0)
-            goto failure;
+        if (append_string(response, capabilities[index]) < 0)
+            return -1;
     }
+    return 0;
+}
+
+static int send_hello(int connection, uint64_t request_id) {
+    struct buffer response = {0};
+    if (append(&response, "NPIF", 4) < 0 || append_u64(&response, request_id) < 0 ||
+        append_guest_info(&response) < 0)
+        goto failure;
     int result = send_buffer(connection, &response);
     free(response.bytes);
     return result;
 failure:
     free(response.bytes);
     return -1;
+}
+
+/* Recovery is guest-initiated.  NPRT is the existing unsolicited ready
+ * handshake, so the accepted socket immediately becomes the ordinary NPIP
+ * control channel; no recovery-only protocol or second negotiation is needed. */
+static int send_ready_handshake(int connection) {
+    struct buffer event = {0};
+    if (append(&event, "NPRT", 4) < 0 || append_guest_info(&event) < 0) {
+        free(event.bytes);
+        return -1;
+    }
+    int result = send_buffer(connection, &event);
+    free(event.bytes);
+    return result;
 }
 
 static int dispatch_request(int connection, const uint8_t *payload, size_t length) {
@@ -904,9 +1333,14 @@ static int dispatch_request(int connection, const uint8_t *payload, size_t lengt
     } else if (!memcmp(payload, "NPIC", 4)) {
         struct np_plan plan;
         if (decode_plan(payload, length, &plan) == 0) {
-            result = send_ack(connection, request_id);
-            if (result == 0 && execute_plan(&plan) < 0)
+            bool response_sent = false;
+            result = execute_plan(&plan, connection, &response_sent);
+            if (result < 0) {
+                int code = errno ? errno : EIO;
                 log_errno("execute plan");
+                if (!response_sent)
+                    send_error(connection, request_id, code, strerror(code));
+            }
             return result;
         }
         errno = EINVAL;
@@ -920,23 +1354,69 @@ static int dispatch_request(int connection, const uint8_t *payload, size_t lengt
     return result;
 }
 
-static int parse_boot_configuration(char *command_line, bool *maintenance, char *root,
-                                    size_t root_capacity, uint64_t *target_memory) {
+static int copy_parameter(char *destination, size_t capacity, const char *value) {
+    size_t length = strlen(value);
+    if (!length || length >= capacity) {
+        errno = EINVAL;
+        return -1;
+    }
+    memcpy(destination, value, length + 1);
+    return 0;
+}
+
+static int parse_seconds(const char *value, uint32_t *seconds, bool allow_zero) {
+    if (*value < '0' || *value > '9') {
+        errno = EINVAL;
+        return -1;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (errno || !end || *end || parsed > UINT32_MAX || (!allow_zero && parsed == 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+    *seconds = (uint32_t)parsed;
+    return 0;
+}
+
+static int parse_boot_configuration(char *command_line, bool *maintenance,
+                                    struct np_plan *plan, uint64_t *target_memory) {
     *maintenance = false;
     *target_memory = 0;
-    root[0] = '\0';
+    initialize_plan(plan);
     char *save = NULL;
     for (char *token = strtok_r(command_line, " \t\r\n", &save); token;
          token = strtok_r(NULL, " \t\r\n", &save)) {
         if (!strcmp(token, "nativepipe.maintenance=1")) {
             *maintenance = true;
         } else if (!strncmp(token, "root=", 5)) {
-            size_t length = strlen(token + 5);
-            if (!length || length >= root_capacity) {
-                errno = EINVAL;
+            if (copy_parameter(plan->root, sizeof(plan->root), token + 5) < 0)
                 return -1;
-            }
-            memcpy(root, token + 5, length + 1);
+        } else if (!strncmp(token, "rootfstype=", 11)) {
+            if (copy_parameter(
+                    plan->root_fstype, sizeof(plan->root_fstype), token + 11) < 0)
+                return -1;
+        } else if (!strncmp(token, "rootflags=", 10)) {
+            if (copy_parameter(plan->root_flags, sizeof(plan->root_flags), token + 10) < 0)
+                return -1;
+        } else if (!strcmp(token, "ro")) {
+            plan->root_read_only = true;
+        } else if (!strcmp(token, "rw")) {
+            plan->root_read_only = false;
+        } else if (!strcmp(token, "rootwait")) {
+            plan->root_wait = true;
+            plan->root_wait_seconds = 0;
+        } else if (!strncmp(token, "rootwait=", 9)) {
+            plan->root_wait = true;
+            if (parse_seconds(token + 9, &plan->root_wait_seconds, false) < 0)
+                return -1;
+        } else if (!strncmp(token, "rootdelay=", 10)) {
+            if (parse_seconds(token + 10, &plan->root_delay_seconds, true) < 0)
+                return -1;
+        } else if (!strncmp(token, "init=", 5)) {
+            if (copy_parameter(plan->init, sizeof(plan->init), token + 5) < 0)
+                return -1;
         } else if (!strncmp(token, "nativepipe.memory_target_bytes=", 31)) {
             const char *value = token + 31;
             if (*value < '0' || *value > '9') {
@@ -954,10 +1434,16 @@ static int parse_boot_configuration(char *command_line, bool *maintenance, char 
             *target_memory = (uint64_t)parsed;
         }
     }
+    if ((plan->root[0] && !valid_root(plan->root)) ||
+        (plan->root_fstype[0] && !valid_fstype(plan->root_fstype)) ||
+        !valid_root_flags(plan->root_flags) || !valid_init(plan->init)) {
+        errno = EINVAL;
+        return -1;
+    }
     return 0;
 }
 
-static int self_test(void) {
+static int self_test(const char *program_path) {
     uint8_t payload[] = {
         'N', 'P', 'I', 'C', 1, 0, 0, 0, 0, 0, 0, 0,
         NP_ACTION_INSTALL, 1, 0, 0,
@@ -970,27 +1456,74 @@ static int self_test(void) {
     struct np_plan plan;
     if (decode_plan(payload, sizeof(payload), &plan) != 0 ||
         plan.action != NP_ACTION_INSTALL || !plan.automatic ||
-        strcmp(plan.disk_identifier, "nativepipe-root") != 0)
+        strcmp(plan.disk_identifier, "nativepipe-root") != 0 ||
+        !plan.root_read_only)
         return 1;
 
-    char valid[] = "console=hvc0 root=/dev/vda2 nativepipe.memory_target_bytes=2147483648";
-    char root[256];
+    char valid[] =
+        "console=hvc0 root=PARTUUID=1234-02 rootfstype=ext4 "
+        "rootflags=noatime ro rootwait=9 rootdelay=2 init=/lib/systemd/systemd "
+        "nativepipe.memory_target_bytes=2147483648";
     bool maintenance = false;
     uint64_t target_memory = 0;
-    if (parse_boot_configuration(valid, &maintenance, root, sizeof(root), &target_memory) < 0 ||
-        maintenance || strcmp(root, "/dev/vda2") || target_memory != UINT64_C(2147483648))
+    if (parse_boot_configuration(valid, &maintenance, &plan, &target_memory) < 0 ||
+        maintenance || strcmp(plan.root, "PARTUUID=1234-02") ||
+        strcmp(plan.root_fstype, "ext4") || strcmp(plan.root_flags, "noatime") ||
+        !plan.root_read_only || !plan.root_wait || plan.root_wait_seconds != 9 ||
+        plan.root_delay_seconds != 2 || strcmp(plan.init, "/lib/systemd/systemd") ||
+        target_memory != UINT64_C(2147483648))
+        return 1;
+
+    char alternatives[] =
+        "root=PARTLABEL=nativepipe-root rootfstype=ext4,xfs ro rw rootwait rootwait=4";
+    if (parse_boot_configuration(
+            alternatives, &maintenance, &plan, &target_memory) < 0 ||
+        strcmp(plan.root, "PARTLABEL=nativepipe-root") ||
+        strcmp(plan.root_fstype, "ext4,xfs") || plan.root_read_only ||
+        !plan.root_wait || plan.root_wait_seconds != 4)
         return 1;
 
     char invalid[] = "nativepipe.memory_target_bytes=not-a-number";
-    if (parse_boot_configuration(invalid, &maintenance, root, sizeof(root), &target_memory) >= 0)
+    if (parse_boot_configuration(invalid, &maintenance, &plan, &target_memory) >= 0)
         return 1;
     char unaligned[] = "nativepipe.memory_target_bytes=1048577";
-    return parse_boot_configuration(unaligned, &maintenance, root, sizeof(root), &target_memory) < 0
-               ? 0
-               : 1;
+    if (parse_boot_configuration(unaligned, &maintenance, &plan, &target_memory) >= 0)
+        return 1;
+
+    char self_path[PATH_MAX];
+    if (!realpath(program_path, self_path))
+        return 1;
+    int root = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (root < 0)
+        return 1;
+    int result = preflight_executable_at(root, self_path, 0);
+    close(root);
+    if (result < 0)
+        return 1;
+
+    char broken_path[] = "/tmp/nativepipe-init-broken.XXXXXX";
+    int broken = mkstemp(broken_path);
+    if (broken < 0 || fchmod(broken, 0755) < 0 ||
+        write_full(broken, "not an ELF", sizeof("not an ELF") - 1) < 0) {
+        if (broken >= 0)
+            close(broken);
+        unlink(broken_path);
+        return 1;
+    }
+    close(broken);
+    root = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (root < 0) {
+        unlink(broken_path);
+        return 1;
+    }
+    result = preflight_executable_at(root, broken_path, 0);
+    int saved = errno;
+    close(root);
+    unlink(broken_path);
+    return result < 0 && saved == ENOEXEC ? 0 : 1;
 }
 
-static int read_boot_configuration(bool *maintenance, char *root, size_t root_capacity,
+static int read_boot_configuration(bool *maintenance, struct np_plan *plan,
                                    uint64_t *target_memory) {
     int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
     if (fd < 0)
@@ -1004,49 +1537,56 @@ static int read_boot_configuration(bool *maintenance, char *root, size_t root_ca
         return -1;
     }
     command_line[count] = '\0';
-    return parse_boot_configuration(
-        command_line, maintenance, root, root_capacity, target_memory);
+    return parse_boot_configuration(command_line, maintenance, plan, target_memory);
 }
 
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0)
-        return self_test();
+        return self_test(argv[0]);
     setup_runtime();
     bool maintenance = false;
     uint64_t target_memory = 0;
     struct np_plan boot_plan;
-    memset(&boot_plan, 0, sizeof(boot_plan));
-    if (read_boot_configuration(
-            &maintenance, boot_plan.root, sizeof(boot_plan.root), &target_memory) < 0) {
+    initialize_plan(&boot_plan);
+    if (read_boot_configuration(&maintenance, &boot_plan, &target_memory) < 0) {
         log_errno("read kernel command line");
-        for (;;)
-            pause();
+        maintenance = true;
     }
     if (target_memory && publish_target_memory(target_memory) < 0)
         log_errno("publish target memory");
     if (!maintenance) {
         if (!valid_root(boot_plan.root)) {
             logmsg("normal boot requires an explicit root= kernel argument");
-            for (;;)
-                pause();
+            errno = EINVAL;
+        } else {
+            logmsg("normal boot; switching directly to the configured root");
+            if (switch_to_root(&boot_plan, -1, NULL) < 0)
+                log_errno("normal root handoff");
         }
-        logmsg("normal boot; switching directly to the configured root");
-        switch_to_root(&boot_plan);
+        logmsg("normal boot could not hand off; entering recovery");
+    } else {
+        logmsg("recovery requested by the kernel command line");
     }
-    control_listener = listen_for_host();
-    if (control_listener < 0) {
-        log_errno("vsock listen");
-        for (;;)
-            pause();
-    }
-    logmsg("ready; waiting for host control on vsock port 1024");
+
+    logmsg("recovery; connecting to host control on vsock CID 2 port 1024");
+    unsigned failed_connections = 0;
     for (;;) {
-        control_connection = accept4(control_listener, NULL, NULL, SOCK_CLOEXEC);
+        control_connection = connect_to_host();
         if (control_connection < 0) {
-            if (errno != EINTR)
-                log_errno("vsock accept");
+            if (failed_connections++ % 30 == 0)
+                log_errno("vsock connect to host");
+            struct timespec delay = {.tv_sec = 1, .tv_nsec = 0};
+            nanosleep(&delay, NULL);
             continue;
         }
+        failed_connections = 0;
+        if (send_ready_handshake(control_connection) < 0) {
+            log_errno("send recovery handshake");
+            close_control_transport();
+            sleep_milliseconds(1000);
+            continue;
+        }
+        logmsg("recovery control connected");
         for (;;) {
             uint8_t *payload = NULL;
             size_t length = 0;
@@ -1057,8 +1597,7 @@ int main(int argc, char **argv) {
             dispatch_request(control_connection, payload, length);
             free(payload);
         }
-        if (control_connection >= 0)
-            close(control_connection);
-        control_connection = -1;
+        close_control_transport();
+        sleep_milliseconds(1000);
     }
 }

@@ -8,9 +8,6 @@ permissions:
   contents: write
 
 env:
-  BUSYBOX_VERSION: '1.36.1'
-  E2FSPROGS_VERSION: '1.47.4'
-  KATA_CONFIG_REF: '3.32.0'
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
 
@@ -22,15 +19,38 @@ jobs:
       - name: Check out configuration
         uses: actions/checkout@v4
 
-      - name: Read kernel version
+      - name: Read source versions
         run: |
-          set -eu
+          set -euo pipefail
           kernel_version="$(tr -d '[:space:]' < KERNEL_VERSION)"
           if ! printf '%s\n' "$kernel_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "Invalid KERNEL_VERSION: $kernel_version" >&2
             exit 1
           fi
           echo "KERNEL_VERSION=$kernel_version" >> "$GITHUB_ENV"
+          source DEPENDENCY_VERSIONS
+          for name in BUSYBOX_VERSION E2FSPROGS_VERSION KATA_CONFIG_REF; do
+            value="${!name}"
+            if ! printf '%s\n' "$value" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Invalid $name: $value" >&2
+              exit 1
+            fi
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
+          if ! printf '%s\n' "$UTIL_LINUX_VERSION" \
+            | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+            echo "Invalid UTIL_LINUX_VERSION: $UTIL_LINUX_VERSION" >&2
+            exit 1
+          fi
+          echo "UTIL_LINUX_VERSION=$UTIL_LINUX_VERSION" >> "$GITHUB_ENV"
+          for name in BUSYBOX_SHA256 E2FSPROGS_SHA256 UTIL_LINUX_SHA256; do
+            value="${!name}"
+            if ! printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "Invalid $name" >&2
+              exit 1
+            fi
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
 
       - name: Install kernel build dependencies
         run: |
@@ -48,7 +68,7 @@ jobs:
             --retry-max-time 300 --retry-all-errors \
             "https://busybox.net/downloads/${busybox_archive}" \
             --output "${busybox_archive}"
-          echo "b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314  ${busybox_archive}" \
+          echo "${BUSYBOX_SHA256}  ${busybox_archive}" \
             | sha256sum --check --strict -
           tar --extract --bzip2 --file "${busybox_archive}"
           cp busybox-initramfs.config "busybox-${BUSYBOX_VERSION}/.config"
@@ -66,6 +86,43 @@ jobs:
           make -C "busybox-${BUSYBOX_VERSION}" -j"$(nproc)" \
             ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE"
 
+      - name: Build static util-linux blkid
+        run: |
+          set -eu
+          archive="util-linux-${UTIL_LINUX_VERSION}.tar.xz"
+          series="$(printf '%s' "$UTIL_LINUX_VERSION" | cut -d. -f1,2)"
+          base="https://www.kernel.org/pub/linux/utils/util-linux/v${series}"
+          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
+            --retry-max-time 300 --retry-all-errors \
+            "${base}/${archive}" --output "${archive}"
+          echo "${UTIL_LINUX_SHA256}  ${archive}" \
+            | sha256sum --check --strict -
+          tar --extract --file "${archive}"
+          mkdir util-linux-build
+          cd util-linux-build
+          "../util-linux-${UTIL_LINUX_VERSION}/configure" \
+            --host="${CROSS_COMPILE%-}" \
+            --disable-all-programs \
+            --enable-blkid \
+            --enable-libblkid \
+            --enable-libuuid \
+            --enable-static-programs=blkid \
+            --disable-shared \
+            --enable-static \
+            --disable-nls \
+            --without-python \
+            --without-systemd \
+            --without-udev
+          make -j"$(nproc)" blkid.static
+          test -x blkid.static
+          mkdir -p ../initramfs-root/sbin
+          cp blkid.static ../initramfs-root/sbin/blkid
+          "${CROSS_COMPILE}strip" ../initramfs-root/sbin/blkid
+          if "${CROSS_COMPILE}readelf" -l ../initramfs-root/sbin/blkid | grep -q INTERP; then
+            echo 'util-linux blkid must be a static ELF.' >&2
+            exit 1
+          fi
+
       - name: Build static ext4 tools
         run: |
           set -eu
@@ -74,7 +131,7 @@ jobs:
           curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
             --retry-max-time 300 --retry-all-errors \
             "${base}/${archive}" --output "${archive}"
-          echo "fd5bf388cbdbe006a3d3b318d983b2948382440acc85a87f1e7d108653e8db0b  ${archive}" \
+          echo "${E2FSPROGS_SHA256}  ${archive}" \
             | sha256sum --check --strict -
           tar --extract --file "${archive}"
           mkdir e2fsprogs-build
@@ -96,8 +153,7 @@ jobs:
             'e2fsck/e2fsck.static:e2fsck' \
             'resize/resize2fs.static:resize2fs' \
             'misc/tune2fs.static:tune2fs' \
-            'misc/dumpe2fs.static:dumpe2fs' \
-            'misc/blkid.static:blkid'; do
+            'misc/dumpe2fs.static:dumpe2fs'; do
             source="${specification%%:*}"
             destination="${specification#*:}"
             test -x "$source"
@@ -244,6 +300,7 @@ jobs:
             CONFIG_RD_GZIP=y \
             CONFIG_MEMORY_HOTPLUG=y \
             CONFIG_MEMORY_HOTREMOVE=y \
+            CONFIG_KVM=y \
             CONFIG_CGROUPS=y \
             CONFIG_MEMCG=y \
             CONFIG_NAMESPACES=y \
@@ -255,15 +312,25 @@ jobs:
             CONFIG_SECURITY_LANDLOCK=y \
             CONFIG_SECURITY_SELINUX=y \
             CONFIG_PCI=y \
+            CONFIG_PCI_HOST_COMMON=y \
+            CONFIG_PCI_HOST_GENERIC=y \
             CONFIG_VIRTIO_PCI=y \
+            CONFIG_VIRTIO_MMIO=y \
+            CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y \
             CONFIG_VIRTIO_BLK=y \
+            CONFIG_NVME_CORE=y \
+            CONFIG_BLK_DEV_NVME=y \
+            CONFIG_NVME_HWMON=y \
             CONFIG_VIRTIO_NET=y \
             CONFIG_VIRTIO_CONSOLE=y \
             CONFIG_HW_RANDOM_VIRTIO=y \
+            CONFIG_HW_RANDOM_ARM_SMCCC_TRNG=y \
             CONFIG_VSOCKETS=y \
             CONFIG_VIRTIO_VSOCKETS=y \
             CONFIG_VIRTIO_BALLOON=y \
             CONFIG_VIRTIO_INPUT=y \
+            CONFIG_CRYPTO_HW=y \
+            CONFIG_CRYPTO_DEV_VIRTIO=y \
             CONFIG_DRM_VIRTIO_GPU=y \
             CONFIG_VIRTIO_FS=y \
             CONFIG_USB=y \
@@ -290,6 +357,13 @@ jobs:
             CONFIG_USB_NET_SMSC95XX=y \
             CONFIG_USB_RTL8152=y \
             CONFIG_USB_RTL8153_ECM=y \
+            CONFIG_GPIOLIB=y \
+            CONFIG_HWMON=y \
+            CONFIG_THERMAL_HWMON=y \
+            CONFIG_THERMAL_OF=y \
+            CONFIG_RTC_NVMEM=y \
+            CONFIG_NVMEM=y \
+            CONFIG_DMADEVICES=y \
             CONFIG_SCSI=y \
             CONFIG_BLK_DEV_SD=y \
             CONFIG_BLK_DEV_SR=y \
@@ -315,6 +389,13 @@ jobs:
             CONFIG_OVERLAY_FS_INDEX=y \
             CONFIG_OVERLAY_FS_XINO_AUTO=y \
             CONFIG_TMPFS_POSIX_ACL=y \
+            CONFIG_DM_MULTIPATH=y \
+            CONFIG_DM_MULTIPATH_QL=y \
+            CONFIG_DM_MULTIPATH_ST=y \
+            CONFIG_ENCRYPTED_KEYS=y \
+            CONFIG_IMA=y \
+            CONFIG_EVM=y \
+            CONFIG_EVM_ATTR_FSUUID=y \
             CONFIG_NET_NS=y \
             CONFIG_VETH=y \
             CONFIG_TUN=y \
@@ -340,25 +421,30 @@ jobs:
           grep -Fxq '# CONFIG_ARM64_4K_PAGES is not set' .config
           grep -Fxq '# CONFIG_MODULES is not set' .config
           grep -Fxq 'CONFIG_LSM="landlock,yama,integrity,apparmor,selinux"' .config
+          # These classes are excluded by current LightHouse product policy,
+          # not because Virtualization.framework can never expose them.
           for setting in \
             '# CONFIG_SOUND is not set' \
-            '# CONFIG_MEDIA_SUPPORT is not set' \
+            '# CONFIG_MEDIA_SUPPORT is not set'; do
+            grep -Fxq "$setting" .config || {
+              echo "An intentionally unsupported product device class was enabled: $setting" >&2
+              exit 1
+            }
+          done
+          # Keep only classes for which VZ has no transport and USB pass-through
+          # cannot make the underlying platform bus visible to the guest.
+          for setting in \
             '# CONFIG_MMC is not set' \
             '# CONFIG_MTD is not set' \
             '# CONFIG_ATA is not set' \
             '# CONFIG_IOMMU_SUPPORT is not set' \
-            '# CONFIG_GPIOLIB is not set' \
             '# CONFIG_PINCTRL is not set' \
             '# CONFIG_SPI is not set' \
             '# CONFIG_ACPI_I2C_OPREGION is not set' \
             '# CONFIG_ACPI_PRMT is not set' \
             '# CONFIG_PMIC_OPREGION is not set' \
-            '# CONFIG_HW_RANDOM_ARM_SMCCC_TRNG is not set' \
-            '# CONFIG_CRYPTO_HW is not set' \
             '# CONFIG_DEVMEM is not set' \
             '# CONFIG_UEVENT_HELPER is not set' \
-            '# CONFIG_HWMON is not set' \
-            '# CONFIG_NVMEM is not set' \
             '# CONFIG_WATCHDOG is not set' \
             '# CONFIG_REGULATOR is not set' \
             '# CONFIG_IIO is not set'; do
@@ -372,12 +458,13 @@ jobs:
             exit 1
           fi
           # The guest only sees VZ/NativePipe virtio devices plus explicitly
-          # supported USB pass-through classes. Reject unreachable hardware.
-          if grep -E '^CONFIG_(SCSI_(HPSA|HISI_SAS|SMARTPQI|VIRTIO)|ATA|SATA_[A-Za-z0-9_]+|PATA_[A-Za-z0-9_]+|NVME_[A-Za-z0-9_]+|BLK_DEV_NVME)=y$' .config; then
-            echo 'A VZ-absent SCSI/SATA/NVMe driver is enabled.' >&2
+          # supported USB pass-through classes. Generic PCI and virtio-mmio are
+          # VZ transport buses, not physical-device drivers.
+          if grep -E '^CONFIG_(SCSI_(HPSA|HISI_SAS|SMARTPQI|VIRTIO)|ATA|SATA_[A-Za-z0-9_]+|PATA_[A-Za-z0-9_]+)=y$' .config; then
+            echo 'A VZ-absent SCSI/SATA driver is enabled.' >&2
             exit 1
           fi
-          if grep -E '^CONFIG_(ARCH_(EXYNOS|HISI|QCOM|SEATTLE|SYNQUACER|THUNDER|THUNDER2|VEXPRESS)|KVM[A-Za-z0-9_]*|VIRTIO_(MEM|MMIO[A-Za-z0-9_]*|PCI_LEGACY|PMEM)|NET_9P_VIRTIO|CRYPTO_DEV_(CAVIUM_ZIP|QCE[A-Za-z0-9_]*|QCOM_RNG|VIRTIO|HISI_SEC[A-Za-z0-9_]*)|SERIAL_(8250[A-Za-z0-9_]*|AMBA_PL011[A-Za-z0-9_]*|SAMSUNG[A-Za-z0-9_]*)|HW_RANDOM_(HISI|HISTB|CAVIUM|EXYNOS|CN10K|TPM)|RTC_DRV_(DS3232[A-Za-z0-9_]*|S3C)|PTP_1588_CLOCK_(KVM|VMCLOCK)|PCI_(STUB|ATS|IOV|PRI|PASID)|VFIO[A-Za-z0-9_]*|VDPA[A-Za-z0-9_]*|VHOST[A-Za-z0-9_]*|IOMMU_SUPPORT|LIBNVDIMM|NVDIMM[A-Za-z0-9_]*|NET_VENDOR_[A-Za-z0-9_]+)=y$' .config; then
+          if grep -E '^CONFIG_(ARCH_(EXYNOS|HISI|QCOM|SEATTLE|SYNQUACER|THUNDER|THUNDER2|VEXPRESS)|VIRTIO_(MEM|PCI_LEGACY|PMEM)|NET_9P_VIRTIO|CRYPTO_DEV_(CAVIUM_ZIP|QCE[A-Za-z0-9_]*|QCOM_RNG|HISI_SEC[A-Za-z0-9_]*)|SERIAL_(8250[A-Za-z0-9_]*|AMBA_PL011[A-Za-z0-9_]*|SAMSUNG[A-Za-z0-9_]*)|HW_RANDOM_(HISI|HISTB|CAVIUM|EXYNOS|CN10K|TPM)|RTC_DRV_(DS3232[A-Za-z0-9_]*|S3C)|PTP_1588_CLOCK_(KVM|VMCLOCK)|PCI_(STUB|ATS|IOV|PRI|PASID)|VFIO[A-Za-z0-9_]*|VDPA[A-Za-z0-9_]*|VHOST[A-Za-z0-9_]*|IOMMU_SUPPORT|LIBNVDIMM|NVDIMM[A-Za-z0-9_]*|NET_VENDOR_[A-Za-z0-9_]+)=y$' .config; then
             echo 'A device outside the VZ/NativePipe/USB hardware contract is enabled.' >&2
             exit 1
           fi
