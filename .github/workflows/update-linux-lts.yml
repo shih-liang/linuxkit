@@ -5,30 +5,71 @@ on:
     - cron: '23 4 * * 1'
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: update-kernel-dependencies
   cancel-in-progress: true
 
 jobs:
-  update:
+  resolve:
     name: Check upstream releases
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      kernel: ${{ steps.versions.outputs.kernel }}
+      busybox: ${{ steps.versions.outputs.busybox }}
+      e2fsprogs: ${{ steps.versions.outputs.e2fsprogs }}
+      util_linux: ${{ steps.versions.outputs.util_linux }}
+      kata: ${{ steps.versions.outputs.kata }}
     steps:
       - name: Check out configuration
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Update all pinned source versions
         id: versions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/update-versions.sh
 
-      - name: Create update pull request
-        uses: peter-evans/create-pull-request@v7
+      - name: Pass resolved versions to the proposal job
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          name: resolved-upstream-versions
+          path: |
+            KERNEL_VERSION
+            DEPENDENCY_VERSIONS
+          if-no-files-found: error
+          retention-days: 1
+
+  propose:
+    name: Propose resolved updates
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download resolved versions
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: resolved-upstream-versions
+          path: .
+
+      - name: Create update pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          token: ${{ github.token }}
           add-paths: |
             KERNEL_VERSION
             DEPENDENCY_VERSIONS
@@ -40,11 +81,11 @@ jobs:
             Updates every pinned upstream source used by the LightHouse kernel
             and initramfs build:
 
-            - Linux LTS `${{ steps.versions.outputs.kernel }}`
-            - BusyBox stable `${{ steps.versions.outputs.busybox }}`
-            - e2fsprogs `${{ steps.versions.outputs.e2fsprogs }}`
-            - util-linux `${{ steps.versions.outputs.util_linux }}`
-            - Kata configuration `${{ steps.versions.outputs.kata }}`
+            - Linux LTS `${{ needs.resolve.outputs.kernel }}`
+            - BusyBox stable `${{ needs.resolve.outputs.busybox }}`
+            - e2fsprogs `${{ needs.resolve.outputs.e2fsprogs }}`
+            - util-linux `${{ needs.resolve.outputs.util_linux }}`
+            - Kata configuration `${{ needs.resolve.outputs.kata }}`
 
             The updater also refuses a PR when Kata's configuration targets a
             different Linux series. The release-only workflow remains the full

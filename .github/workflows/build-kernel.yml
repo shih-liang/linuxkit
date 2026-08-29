@@ -1,11 +1,15 @@
 name: Build LightHouse ARM64 16K kernel and initramfs
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'lighthouse-kernel-v*'
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: kernel-release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   ARCH: arm64
@@ -15,11 +19,20 @@ jobs:
   build:
     name: Build ARM64 16 KiB kernel
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      kernel_version: ${{ steps.versions.outputs.kernel_version }}
+      release_revision: ${{ steps.versions.outputs.release_revision }}
     steps:
       - name: Check out configuration
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Read source versions
+        id: versions
         run: |
           set -euo pipefail
           kernel_version="$(tr -d '[:space:]' < KERNEL_VERSION)"
@@ -27,7 +40,14 @@ jobs:
             echo "Invalid KERNEL_VERSION: $kernel_version" >&2
             exit 1
           fi
-          echo "KERNEL_VERSION=$kernel_version" >> "$GITHUB_ENV"
+          release_prefix="lighthouse-kernel-v${kernel_version}-"
+          release_revision="${GITHUB_REF_NAME#"$release_prefix"}"
+          if [ "$GITHUB_REF_NAME" = "$release_revision" ] \
+            || ! printf '%s\n' "$release_revision" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "Release tag $GITHUB_REF_NAME must match ${release_prefix}<positive revision>." >&2
+            exit 1
+          fi
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
           source DEPENDENCY_VERSIONS
           for name in BUSYBOX_VERSION E2FSPROGS_VERSION KATA_CONFIG_REF; do
             value="${!name}"
@@ -35,22 +55,38 @@ jobs:
               echo "Invalid $name: $value" >&2
               exit 1
             fi
-            echo "$name=$value" >> "$GITHUB_ENV"
           done
           if ! printf '%s\n' "$UTIL_LINUX_VERSION" \
             | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
             echo "Invalid UTIL_LINUX_VERSION: $UTIL_LINUX_VERSION" >&2
             exit 1
           fi
-          echo "UTIL_LINUX_VERSION=$UTIL_LINUX_VERSION" >> "$GITHUB_ENV"
           for name in BUSYBOX_SHA256 E2FSPROGS_SHA256 UTIL_LINUX_SHA256; do
             value="${!name}"
             if ! printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{64}$'; then
               echo "Invalid $name" >&2
               exit 1
             fi
-            echo "$name=$value" >> "$GITHUB_ENV"
           done
+          {
+            echo "KERNEL_VERSION=$kernel_version"
+            echo "RELEASE_REVISION=$release_revision"
+            echo "SOURCE_DATE_EPOCH=$source_date_epoch"
+            echo "KBUILD_BUILD_TIMESTAMP=@$source_date_epoch"
+            echo "KBUILD_BUILD_USER=lighthouse"
+            echo "KBUILD_BUILD_HOST=github-actions"
+            echo "BUSYBOX_VERSION=$BUSYBOX_VERSION"
+            echo "BUSYBOX_SHA256=$BUSYBOX_SHA256"
+            echo "E2FSPROGS_VERSION=$E2FSPROGS_VERSION"
+            echo "E2FSPROGS_SHA256=$E2FSPROGS_SHA256"
+            echo "UTIL_LINUX_VERSION=$UTIL_LINUX_VERSION"
+            echo "UTIL_LINUX_SHA256=$UTIL_LINUX_SHA256"
+            echo "KATA_CONFIG_REF=$KATA_CONFIG_REF"
+          } >> "$GITHUB_ENV"
+          {
+            echo "kernel_version=$kernel_version"
+            echo "release_revision=$release_revision"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install kernel build dependencies
         run: |
@@ -209,10 +245,11 @@ jobs:
           mkdir -p initramfs-root/dev initramfs-root/proc initramfs-root/sys \
             initramfs-root/run initramfs-root/newroot initramfs-root/tmp
           chmod 1777 initramfs-root/tmp
+          find initramfs-root -exec touch -h --date="@$SOURCE_DATE_EPOCH" {} +
           (
             cd initramfs-root
             find . -print0 | LC_ALL=C sort -z \
-              | cpio --null --create --format=newc --owner=0:0
+              | cpio --null --create --format=newc --owner=0:0 --reproducible
           ) > "lighthouse-initramfs-${KERNEL_VERSION}-arm64.cpio"
           gzip --no-name --best --stdout \
             "lighthouse-initramfs-${KERNEL_VERSION}-arm64.cpio" \
@@ -487,9 +524,11 @@ jobs:
           cp "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" release/
           cp "linux-${KERNEL_VERSION}/.config" release/config-aarch64
           cp "linux-${KERNEL_VERSION}/System.map" release/System.map
-          tar --create --gzip --file \
-            "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" \
-            -C release .
+          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
+            --owner=0 --group=0 --numeric-owner --format=gnu \
+            --create --file=- -C release . \
+            | gzip --no-name --best \
+            > "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz"
           mkdir -p artifact
           cp "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" artifact/
           cp "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" artifact/
@@ -502,34 +541,66 @@ jobs:
             config-aarch64 System.map > SHA256SUMS)
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: lighthouse-linux-arm64-16k
           path: artifact/*
           if-no-files-found: error
+          retention-days: 14
 
   release:
-    name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/lighthouse-kernel-v')
+    name: Publish verified prerelease
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      KERNEL_VERSION: ${{ needs.build.outputs.kernel_version }}
+      RELEASE_REVISION: ${{ needs.build.outputs.release_revision }}
     steps:
       - name: Download build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           name: lighthouse-linux-arm64-16k
           path: release
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          draft: false
-          generate_release_notes: true
-          files: |
-            release/lighthouse-linux-*-arm64-16k.tar.gz
-            release/lighthouse-linux-*-arm64-16k.Image
-            release/lighthouse-initramfs-*-arm64.img
-            release/config-aarch64
-            release/System.map
+      - name: Verify downloaded artifact
+        run: |
+          set -eu
+          cd release
+          sha256sum --check --strict SHA256SUMS
+          test -f "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz"
+          test -f "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image"
+          test -f "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
+          test -f config-aarch64
+          test -f System.map
+
+      - name: Publish immutable prerelease candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          tagged_sha="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha)"
+          if [ "$tagged_sha" != "$GITHUB_SHA" ]; then
+            echo "Tag $tag moved from built commit $GITHUB_SHA to $tagged_sha." >&2
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release or draft $tag already exists; refusing to replace its assets." >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            --verify-tag \
+            --draft \
+            --generate-notes \
+            --title "LightHouse Kernel ${KERNEL_VERSION}-${RELEASE_REVISION}" \
+            "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" \
+            "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" \
+            "release/lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" \
+            release/config-aarch64 \
+            release/System.map \
             release/SHA256SUMS
+          gh release edit "$tag" --draft=false --prerelease

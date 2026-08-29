@@ -9,10 +9,22 @@ source DEPENDENCY_VERSIONS
 current_kernel="$(tr -d '[:space:]' < KERNEL_VERSION)"
 
 fetch() {
+    local url="$1"
+    local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    local -a headers=(--user-agent 'LightHouse dependency updater')
+
+    if [[ "$url" == https://api.github.com/* && -n "$token" ]]; then
+        headers+=(
+            --header "Authorization: Bearer $token"
+            --header 'Accept: application/vnd.github+json'
+            --header 'X-GitHub-Api-Version: 2022-11-28'
+        )
+    fi
+
     curl --http1.1 --fail --location --silent --show-error \
         --connect-timeout 10 --max-time 90 \
         --retry 5 --retry-delay 3 --retry-max-time 180 --retry-all-errors \
-        --user-agent 'LightHouse dependency updater' "$1"
+        "${headers[@]}" "$url"
 }
 
 require_version() {
