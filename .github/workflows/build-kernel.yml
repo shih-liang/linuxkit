@@ -366,6 +366,11 @@ jobs:
             CONFIG_VIRTIO_VSOCKETS=y \
             CONFIG_VIRTIO_BALLOON=y \
             CONFIG_VIRTIO_INPUT=y \
+            CONFIG_SOUND=y \
+            CONFIG_SND=y \
+            CONFIG_SND_TIMER=y \
+            CONFIG_SND_PCM=y \
+            CONFIG_SND_VIRTIO=y \
             CONFIG_CRYPTO_HW=y \
             CONFIG_CRYPTO_DEV_VIRTIO=y \
             CONFIG_DRM_VIRTIO_GPU=y \
@@ -461,7 +466,6 @@ jobs:
           # These classes are excluded by current LightHouse product policy,
           # not because Virtualization.framework can never expose them.
           for setting in \
-            '# CONFIG_SOUND is not set' \
             '# CONFIG_MEDIA_SUPPORT is not set'; do
             grep -Fxq "$setting" .config || {
               echo "An intentionally unsupported product device class was enabled: $setting" >&2
