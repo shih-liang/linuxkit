@@ -1253,7 +1253,8 @@ static int append_guest_info(struct buffer *response) {
         "initramfs-1", release, "LightHouse Recovery", "1", "nativepipe-init",
     };
     const char *capabilities[] = {
-        "init.control", "init.mount", "init.execute", "fs.read", "fs.stat", "fs.write",
+        "init.control", "init.mount", "init.execute", "init.install.rootfs.v1",
+        "fs.read", "fs.stat", "fs.write",
     };
     for (size_t index = 0; index < sizeof(fields) / sizeof(fields[0]); index++) {
         if (append_string(response, fields[index]) < 0)

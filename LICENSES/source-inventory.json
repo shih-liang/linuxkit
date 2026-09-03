@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "id": "linuxkit-platform-original",
+      "origin": "LightHouse project copyright holders",
+      "licenseExpression": "LicenseRef-LightHouse-Original",
+      "licenseNotice": "Copyright remains with the LightHouse project copyright holders. All rights reserved. This inventory does not infer or grant an open-source license for original files.",
+      "licenseFile": "LICENSES/LightHouse-Original.txt",
+      "coveredPaths": [
+        ".github/workflows/build-guest-platform.yml",
+        ".github/workflows/sign-guest-platform.yml",
+        "LICENSES/LightHouse-Original.txt",
+        "LICENSES/README.md",
+        "LICENSES/source-inventory.json",
+        "Resources/**",
+        "adapters/**",
+        "guest-platform/**",
+        "scripts/sign-installation-catalog.py"
+      ],
+      "excludedPaths": [
+        "guest-platform/build/**",
+        "guest-platform/dist/**"
+      ]
+    },
+    {
+      "id": "zig-0.16.0",
+      "origin": "Zig contributors",
+      "source": "https://github.com/ziglang/zig/tree/0.16.0",
+      "licenseExpression": "MIT",
+      "licenseFile": "LICENSES/Zig-MIT.txt",
+      "licenseFileSHA256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177",
+      "releaseArtifactPaths": [
+        "guest/bootstrap/dist/nativepipe-bootstrap-*",
+        "guest/guestd/dist/nativepipe-guestd-*"
+      ]
+    },
+    {
+      "id": "musl-zig-0.16.0",
+      "origin": "musl authors and contributors; exact terms and component notices are retained in the bundled COPYRIGHT file",
+      "source": "https://github.com/ziglang/zig/blob/0.16.0/lib/libc/musl/COPYRIGHT",
+      "licenseExpression": "LicenseRef-musl-COPYRIGHT",
+      "licenseFile": "LICENSES/musl-COPYRIGHT.txt",
+      "licenseFileSHA256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af",
+      "releaseArtifactPaths": [
+        "guest/bootstrap/dist/nativepipe-bootstrap-*",
+        "guest/guestd/dist/nativepipe-guestd-*"
+      ]
+    }
+  ],
+  "releaseLicenseFiles": [
+    "LICENSES/README.md",
+    "LICENSES/LightHouse-Original.txt",
+    "LICENSES/Zig-MIT.txt",
+    "LICENSES/musl-COPYRIGHT.txt",
+    "LICENSES/source-inventory.json"
+  ]
+}

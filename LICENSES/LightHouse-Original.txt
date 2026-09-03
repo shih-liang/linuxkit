@@ -1,0 +1,10 @@
+LightHouse project-original material
+
+Copyright remains with the LightHouse project copyright holders. All rights
+reserved.
+
+This notice identifies project-original material for release provenance. It
+does not infer or grant an open-source license. Publication by the copyright
+holder or an authorized publisher does not place this material under an
+open-source license or grant recipients rights beyond applicable law and any
+separate written terms.

@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+
+description="NativePipe guest agent"
+command="/usr/libexec/nativepipe/nativepipe-guestd"
+command_background=true
+pidfile="/run/nativepipe-guestd.pid"
+output_log="/var/log/nativepipe-guestd.log"
+error_log="/var/log/nativepipe-guestd.log"
+supervisor="supervise-daemon"
+respawn_delay=1
+
+depend() {
+	need localmount
+	# Explicitly not `need net`: the control channel is vsock, and the window
+	# system must survive a guest with no working network.
+	before net
+}

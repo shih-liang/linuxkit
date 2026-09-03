@@ -1,0 +1,13 @@
+[Unit]
+Description=NativePipe guest agent
+# Control plane is vsock, not IP — do not wait for networking.
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/nativepipe/nativepipe-guestd
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

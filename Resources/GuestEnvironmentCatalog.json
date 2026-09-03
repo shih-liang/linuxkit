@@ -1,0 +1,164 @@
+{
+  "schema": 1,
+  "revision": 2,
+  "generatedAt": "2026-08-15T13:29:59Z",
+  "profiles": [
+    {
+      "id": "alpine-openrc",
+      "priority": 300,
+      "match": {
+        "identities": ["alpine"],
+        "versionPrefixes": [],
+        "initSystems": ["openrc"],
+        "architectures": []
+      },
+      "integration": {
+        "consoleAdapters": ["extlinux", "grub", "kernel-cmdline", "inittab"],
+        "gettyAdapter": "inittab",
+        "serviceAdapter": "openrc",
+        "loginShells": ["/bin/ash", "/bin/sh", "/bin/bash"],
+        "administratorGroups": ["wheel"],
+        "disableUnavailableSerialGettys": true,
+        "cloudInitRecovery": true,
+        "repairCloudInitNetworkCache": true
+      }
+    },
+    {
+      "id": "debian-systemd",
+      "priority": 250,
+      "match": {
+        "identities": ["debian", "ubuntu"],
+        "versionPrefixes": [],
+        "initSystems": ["systemd"],
+        "architectures": []
+      },
+      "integration": {
+        "consoleAdapters": ["grub", "bls", "kernel-cmdline", "extlinux"],
+        "gettyAdapter": "systemd",
+        "serviceAdapter": "systemd",
+        "loginShells": ["/bin/bash", "/usr/bin/bash", "/bin/sh"],
+        "administratorGroups": ["sudo"],
+        "disableUnavailableSerialGettys": false,
+        "cloudInitRecovery": true,
+        "repairCloudInitNetworkCache": true
+      }
+    },
+    {
+      "id": "fedora-systemd",
+      "priority": 250,
+      "match": {
+        "identities": ["fedora", "rhel", "centos", "rocky", "almalinux"],
+        "versionPrefixes": [],
+        "initSystems": ["systemd"],
+        "architectures": []
+      },
+      "integration": {
+        "consoleAdapters": ["bls", "grub", "kernel-cmdline"],
+        "gettyAdapter": "systemd",
+        "serviceAdapter": "systemd",
+        "loginShells": ["/bin/bash", "/usr/bin/bash", "/bin/sh"],
+        "administratorGroups": ["wheel"],
+        "disableUnavailableSerialGettys": false,
+        "cloudInitRecovery": true,
+        "repairCloudInitNetworkCache": true
+      }
+    },
+    {
+      "id": "arch-systemd",
+      "priority": 250,
+      "match": {
+        "identities": ["arch", "manjaro"],
+        "versionPrefixes": [],
+        "initSystems": ["systemd"],
+        "architectures": []
+      },
+      "integration": {
+        "consoleAdapters": ["bls", "grub", "kernel-cmdline", "extlinux"],
+        "gettyAdapter": "systemd",
+        "serviceAdapter": "systemd",
+        "loginShells": ["/bin/bash", "/usr/bin/bash", "/bin/sh"],
+        "administratorGroups": ["wheel"],
+        "disableUnavailableSerialGettys": false,
+        "cloudInitRecovery": false,
+        "repairCloudInitNetworkCache": false
+      }
+    },
+    {
+      "id": "suse-systemd",
+      "priority": 250,
+      "match": {
+        "identities": ["sles", "opensuse", "opensuse-leap", "opensuse-tumbleweed"],
+        "versionPrefixes": [],
+        "initSystems": ["systemd"],
+        "architectures": []
+      },
+      "integration": {
+        "consoleAdapters": ["grub", "bls", "kernel-cmdline"],
+        "gettyAdapter": "systemd",
+        "serviceAdapter": "systemd",
+        "loginShells": ["/bin/bash", "/usr/bin/bash", "/bin/sh"],
+        "administratorGroups": ["wheel"],
+        "disableUnavailableSerialGettys": false,
+        "cloudInitRecovery": true,
+        "repairCloudInitNetworkCache": true
+      }
+    },
+    {
+      "id": "generic-systemd",
+      "priority": 20,
+      "match": {
+        "identities": [],
+        "versionPrefixes": [],
+        "initSystems": ["systemd"],
+        "architectures": []
+      },
+      "integration": {
+        "consoleAdapters": ["grub", "bls", "kernel-cmdline", "extlinux"],
+        "gettyAdapter": "systemd",
+        "serviceAdapter": "systemd",
+        "loginShells": ["/bin/bash", "/usr/bin/bash", "/bin/ash", "/bin/sh"],
+        "disableUnavailableSerialGettys": false,
+        "cloudInitRecovery": true,
+        "repairCloudInitNetworkCache": true
+      }
+    },
+    {
+      "id": "generic-openrc",
+      "priority": 20,
+      "match": {
+        "identities": [],
+        "versionPrefixes": [],
+        "initSystems": ["openrc"],
+        "architectures": []
+      },
+      "integration": {
+        "consoleAdapters": ["grub", "bls", "kernel-cmdline", "extlinux", "inittab"],
+        "gettyAdapter": "inittab",
+        "serviceAdapter": "openrc",
+        "loginShells": ["/bin/ash", "/bin/bash", "/usr/bin/bash", "/bin/sh"],
+        "disableUnavailableSerialGettys": true,
+        "cloudInitRecovery": true,
+        "repairCloudInitNetworkCache": true
+      }
+    },
+    {
+      "id": "generic-linux",
+      "priority": 0,
+      "match": {
+        "identities": [],
+        "versionPrefixes": [],
+        "initSystems": [],
+        "architectures": []
+      },
+      "integration": {
+        "consoleAdapters": ["grub", "bls", "kernel-cmdline", "extlinux", "inittab"],
+        "gettyAdapter": "auto",
+        "serviceAdapter": "auto",
+        "loginShells": ["/bin/bash", "/usr/bin/bash", "/bin/ash", "/bin/sh"],
+        "disableUnavailableSerialGettys": true,
+        "cloudInitRecovery": true,
+        "repairCloudInitNetworkCache": true
+      }
+    }
+  ]
+}

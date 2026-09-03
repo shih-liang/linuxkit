@@ -122,7 +122,7 @@ jobs:
           make -C "busybox-${BUSYBOX_VERSION}" -j"$(nproc)" \
             ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE"
 
-      - name: Build static util-linux blkid
+      - name: Build static util-linux disk tools
         run: |
           set -eu
           archive="util-linux-${UTIL_LINUX_VERSION}.tar.xz"
@@ -140,24 +140,32 @@ jobs:
             --host="${CROSS_COMPILE%-}" \
             --disable-all-programs \
             --enable-blkid \
+            --enable-fdisks \
             --enable-libblkid \
+            --enable-libfdisk \
+            --enable-libsmartcols \
             --enable-libuuid \
-            --enable-static-programs=blkid \
+            --enable-static-programs=blkid,sfdisk \
             --disable-shared \
             --enable-static \
             --disable-nls \
             --without-python \
             --without-systemd \
             --without-udev
-          make -j"$(nproc)" blkid.static
+          make -j"$(nproc)" blkid.static sfdisk.static
           test -x blkid.static
+          test -x sfdisk.static
           mkdir -p ../initramfs-root/sbin
           cp blkid.static ../initramfs-root/sbin/blkid
-          "${CROSS_COMPILE}strip" ../initramfs-root/sbin/blkid
-          if "${CROSS_COMPILE}readelf" -l ../initramfs-root/sbin/blkid | grep -q INTERP; then
-            echo 'util-linux blkid must be a static ELF.' >&2
-            exit 1
-          fi
+          cp sfdisk.static ../initramfs-root/sbin/sfdisk
+          for tool in blkid sfdisk; do
+            "${CROSS_COMPILE}strip" "../initramfs-root/sbin/$tool"
+            if "${CROSS_COMPILE}readelf" -l "../initramfs-root/sbin/$tool" \
+              | grep -q INTERP; then
+              echo "util-linux $tool must be a static ELF." >&2
+              exit 1
+            fi
+          done
 
       - name: Build static ext4 tools
         run: |
@@ -232,14 +240,18 @@ jobs:
           make -C "busybox-${BUSYBOX_VERSION}" \
             ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             CONFIG_PREFIX="$PWD/initramfs-root" install
+          mkdir -p initramfs-root/usr/share/udhcpc
+          cp adapters/udhcpc.sh initramfs-root/usr/share/udhcpc/default.script
+          chmod 0755 initramfs-root/usr/share/udhcpc/default.script
           ln -s /proc/mounts initramfs-root/etc/mtab
           ln -s sbin/nativepipe-init initramfs-root/init
           test -x initramfs-root/bin/sh
           test -x initramfs-root/bin/mount
           test -x initramfs-root/bin/umount
           test -x initramfs-root/sbin/switch_root
+          test -x initramfs-root/usr/share/udhcpc/default.script
           test "$(readlink initramfs-root/sbin/switch_root)" = '../bin/busybox'
-          for tool in nativepipe-init mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid; do
+          for tool in nativepipe-init mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid sfdisk; do
             test -x "initramfs-root/sbin/$tool"
           done
           mkdir -p initramfs-root/dev initramfs-root/proc initramfs-root/sys \
@@ -331,10 +343,34 @@ jobs:
           set -eu
           cd "linux-${KERNEL_VERSION}"
           make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          # This is the complete Linux hardware contract that LightHouse can
+          # currently ask Virtualization.framework to expose: direct boot,
+          # PCI/virtio-mmio, block/NVMe, network, console, entropy, vsock,
+          # balloon, input, sound, graphics, virtio-fs, and the XHCI-backed USB
+          # classes accepted by the product's USB picker.
+          # Check the resolved .config rather than trusting the input fragment:
+          # olddefconfig may otherwise silently drop a leaf whose dependency
+          # changed in a newer LTS kernel.
           for setting in \
             CONFIG_ARM64_16K_PAGES=y \
+            CONFIG_MODULES=y \
+            CONFIG_MODULE_UNLOAD=y \
+            CONFIG_MODVERSIONS=y \
+            CONFIG_MODULE_SRCVERSION_ALL=y \
+            CONFIG_TCP_CONG_BIC=y \
+            CONFIG_TCP_CONG_WESTWOOD=y \
+            CONFIG_TCP_CONG_HTCP=y \
             CONFIG_BLK_DEV_INITRD=y \
             CONFIG_RD_GZIP=y \
+            CONFIG_EFI=y \
+            CONFIG_EFI_STUB=y \
+            CONFIG_OF=y \
+            CONFIG_ARM_PSCI_FW=y \
+            CONFIG_ARM_ARCH_TIMER=y \
+            CONFIG_ARM_GIC=y \
+            CONFIG_ARM_GIC_V3=y \
+            CONFIG_GPIO_PL061=y \
+            CONFIG_RTC_DRV_PL031=y \
             CONFIG_MEMORY_HOTPLUG=y \
             CONFIG_MEMORY_HOTREMOVE=y \
             CONFIG_KVM=y \
@@ -349,8 +385,11 @@ jobs:
             CONFIG_SECURITY_LANDLOCK=y \
             CONFIG_SECURITY_SELINUX=y \
             CONFIG_PCI=y \
+            CONFIG_PCI_ECAM=y \
             CONFIG_PCI_HOST_COMMON=y \
             CONFIG_PCI_HOST_GENERIC=y \
+            CONFIG_VIRTIO=y \
+            CONFIG_VIRTIO_PCI_LIB=y \
             CONFIG_VIRTIO_PCI=y \
             CONFIG_VIRTIO_MMIO=y \
             CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y \
@@ -364,8 +403,11 @@ jobs:
             CONFIG_HW_RANDOM_ARM_SMCCC_TRNG=y \
             CONFIG_VSOCKETS=y \
             CONFIG_VIRTIO_VSOCKETS=y \
+            CONFIG_VIRTIO_VSOCKETS_COMMON=y \
             CONFIG_VIRTIO_BALLOON=y \
             CONFIG_VIRTIO_INPUT=y \
+            CONFIG_INPUT=y \
+            CONFIG_INPUT_EVDEV=y \
             CONFIG_SOUND=y \
             CONFIG_SND=y \
             CONFIG_SND_TIMER=y \
@@ -373,11 +415,22 @@ jobs:
             CONFIG_SND_VIRTIO=y \
             CONFIG_CRYPTO_HW=y \
             CONFIG_CRYPTO_DEV_VIRTIO=y \
+            CONFIG_DMA_SHARED_BUFFER=y \
+            CONFIG_VIRTIO_DMA_SHARED_BUFFER=y \
+            CONFIG_DRM=y \
+            CONFIG_DRM_KMS_HELPER=y \
+            CONFIG_DRM_GEM_SHMEM_HELPER=y \
             CONFIG_DRM_VIRTIO_GPU=y \
+            CONFIG_DRM_VIRTIO_GPU_KMS=y \
+            CONFIG_FUSE_FS=y \
             CONFIG_VIRTIO_FS=y \
+            CONFIG_USB_SUPPORT=y \
+            CONFIG_USB_COMMON=y \
             CONFIG_USB=y \
             CONFIG_USB_XHCI_HCD=y \
             CONFIG_USB_XHCI_PCI=y \
+            CONFIG_HID_SUPPORT=y \
+            CONFIG_HID=y \
             CONFIG_USB_HID=y \
             CONFIG_HID_GENERIC=y \
             CONFIG_HIDRAW=y \
@@ -406,6 +459,8 @@ jobs:
             CONFIG_RTC_NVMEM=y \
             CONFIG_NVMEM=y \
             CONFIG_DMADEVICES=y \
+            CONFIG_SCSI_MOD=y \
+            CONFIG_SCSI_COMMON=y \
             CONFIG_SCSI=y \
             CONFIG_BLK_DEV_SD=y \
             CONFIG_BLK_DEV_SR=y \
@@ -461,7 +516,8 @@ jobs:
             }
           done
           grep -Fxq '# CONFIG_ARM64_4K_PAGES is not set' .config
-          grep -Fxq '# CONFIG_MODULES is not set' .config
+          grep -Fxq '# CONFIG_MODULE_SIG is not set' .config
+          grep -Fxq '# CONFIG_TRIM_UNUSED_KSYMS is not set' .config
           grep -Fxq 'CONFIG_LSM="landlock,yama,integrity,apparmor,selinux"' .config
           # These classes are excluded by current LightHouse product policy,
           # not because Virtualization.framework can never expose them.
@@ -495,7 +551,7 @@ jobs:
             }
           done
           if grep -E '^CONFIG_[A-Za-z0-9_]+=m$' .config; then
-            echo 'The LightHouse kernel must not leave retained features as modules.' >&2
+            echo 'LightHouse boot and supported-device features must remain built in.' >&2
             exit 1
           fi
           # The guest only sees VZ/NativePipe virtio devices plus explicitly
@@ -509,17 +565,44 @@ jobs:
             echo 'A device outside the VZ/NativePipe/USB hardware contract is enabled.' >&2
             exit 1
           fi
-          printf 'Resolved config: %s built-ins, 0 modules\n' \
+          printf 'Resolved config: %s built-ins; external modules enabled; 0 in-tree modular features\n' \
             "$(grep -Ec '^CONFIG_[A-Za-z0-9_]+=y$' .config)"
 
       - name: Build kernel
         run: |
           cd "linux-${KERNEL_VERSION}"
-          make -j"$(nproc)" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" Image
+          make -j"$(nproc)" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+            Image modules
+
+      - name: Verify external module ABI
+        run: |
+          set -eu
+          module_dir="$PWD/module-smoke"
+          mkdir -p "$module_dir"
+          printf '%s\n' 'obj-m := lighthouse_module_smoke.o' > "$module_dir/Makefile"
+          printf '%s\n' \
+            '#include <linux/init.h>' \
+            '#include <linux/module.h>' \
+            'static int __init lighthouse_module_smoke_init(void) { return 0; }' \
+            'static void __exit lighthouse_module_smoke_exit(void) {}' \
+            'module_init(lighthouse_module_smoke_init);' \
+            'module_exit(lighthouse_module_smoke_exit);' \
+            'MODULE_DESCRIPTION("LightHouse external module ABI smoke test");' \
+            'MODULE_LICENSE("GPL");' \
+            > "$module_dir/lighthouse_module_smoke.c"
+          make -C "linux-${KERNEL_VERSION}" \
+            ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+            M="$module_dir" modules
+          test -s "$module_dir/lighthouse_module_smoke.ko"
+          "$CROSS_COMPILE"readelf -h "$module_dir/lighthouse_module_smoke.ko" \
+            | grep -q 'Machine:.*AArch64'
 
       - name: Package kernel and metadata
         run: |
           set -eu
+          python3 adapters/validate.py
+          for adapter in adapters/*.sh; do sh -n "$adapter"; done
+          sh adapters/udhcpc.sh --self-test
           mkdir -p release
           cp "linux-${KERNEL_VERSION}/arch/arm64/boot/Image" \
             "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image"
@@ -528,21 +611,29 @@ jobs:
           cp "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" release/
           cp "linux-${KERNEL_VERSION}/.config" release/config-aarch64
           cp "linux-${KERNEL_VERSION}/System.map" release/System.map
+          cp "linux-${KERNEL_VERSION}/Module.symvers" release/Module.symvers
           tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
             --owner=0 --group=0 --numeric-owner --format=gnu \
             --create --file=- -C release . \
             | gzip --no-name --best \
             > "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz"
+          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
+            --owner=0 --group=0 --numeric-owner --format=gnu \
+            --create --file=- -C adapters . \
+            | gzip --no-name --best \
+            > "release/lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz"
           mkdir -p artifact
           cp "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" artifact/
           cp "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" artifact/
           cp "release/lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" artifact/
-          cp release/config-aarch64 release/System.map artifact/
+          cp "release/lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz" artifact/
+          cp release/config-aarch64 release/System.map release/Module.symvers artifact/
           (cd artifact && sha256sum \
             "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" \
             "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" \
             "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" \
-            config-aarch64 System.map > SHA256SUMS)
+            "lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz" \
+            config-aarch64 System.map Module.symvers > SHA256SUMS)
 
       - name: Upload build artifact
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -577,7 +668,9 @@ jobs:
           test -f "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz"
           test -f "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image"
           test -f "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
+          test -f "lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz"
           test -f config-aarch64
+          test -f Module.symvers
           test -f System.map
 
       - name: Publish immutable prerelease candidate
@@ -604,7 +697,9 @@ jobs:
             "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" \
             "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" \
             "release/lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" \
+            "release/lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz" \
             release/config-aarch64 \
             release/System.map \
+            release/Module.symvers \
             release/SHA256SUMS
           gh release edit "$tag" --draft=false --prerelease
