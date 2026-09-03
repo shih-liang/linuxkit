@@ -191,6 +191,8 @@ jobs:
     permissions:
       contents: read
     uses: shih-liang/linuxkit/.github/workflows/sign-guest-platform.yml@main
+    secrets:
+      signing_key: ${{ secrets.LIGHTHOUSE_PLATFORM_ED25519_PRIVATE_KEY }}
     with:
       artifact_name: lighthouse-guest-platform
       release_tag: ${{ github.ref_name }}
