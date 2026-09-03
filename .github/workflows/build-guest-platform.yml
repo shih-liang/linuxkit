@@ -311,5 +311,6 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" release/* \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
+            --prerelease \
             --title "LightHouse Guest Platform ${{ steps.identity.outputs.version }}-${{ steps.identity.outputs.sequence }}" \
             --generate-notes
