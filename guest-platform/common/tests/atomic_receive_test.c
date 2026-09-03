@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "np.h"
 
 #include <dirent.h>

@@ -21,7 +21,7 @@ GUESTD_HEADERS := \
 	guestd/session_stack.h
 TARGET_CFLAGS := -std=c11 -Icommon -O2 -static -s
 GUESTD_CFLAGS := $(TARGET_CFLAGS) -pthread -DNP_GUESTD_VERSION=\"$(VERSION)\"
-HOST_CFLAGS := -std=c11 -Wall -Wextra -Werror -O2
+HOST_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -O2
 
 .PHONY: all build aarch64 x86_64 test test-license test-package package clean
 
