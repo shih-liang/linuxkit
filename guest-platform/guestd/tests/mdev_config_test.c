@@ -40,8 +40,11 @@ int main(void) {
     char root[] = "/tmp/nativepipe-mdev-test.XXXXXX";
     check(mkdtemp(root) != NULL, "mkdtemp failed");
     char etc[512], path[512];
-    snprintf(etc, sizeof(etc), "%s/etc", root);
-    snprintf(path, sizeof(path), "%s/mdev.conf", etc);
+    check(snprintf(etc, sizeof(etc), "%s/etc", root) < (int)sizeof(etc),
+          "etc path too long");
+    check(snprintf(path, sizeof(path), "%s/etc/mdev.conf", root) <
+              (int)sizeof(path),
+          "mdev path too long");
     check(mkdir(etc, 0755) == 0, "mkdir failed");
 
     static const char rule[] =
