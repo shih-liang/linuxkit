@@ -25,7 +25,8 @@ install)
 		kmod pipewire pipewire-alsa pipewire-pulseaudio wireplumber \
 		mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers \
 		libglvnd-gles wayland-libs libxkbcommon libxcb \
-		xcb-util-cursor vulkan-loader xorg-x11-server-Xwayland
+		xcb-util-cursor vulkan-loader xorg-x11-server-Xwayland \
+		xwayland-satellite
 	finish_rootfs
 	;;
 software)

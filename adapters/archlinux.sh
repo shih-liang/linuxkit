@@ -16,7 +16,7 @@ install)
 	run_in_target "$NP_TARGET_ROOT" /usr/bin/pacman -Syu --noconfirm \
 		--needed kmod pipewire pipewire-audio pipewire-pulse wireplumber \
 		mesa vulkan-virtio wayland libxkbcommon libxcb xcb-util-cursor \
-		vulkan-icd-loader xorg-xwayland
+		vulkan-icd-loader xorg-xwayland xwayland-satellite
 	finish_rootfs
 	;;
 software)

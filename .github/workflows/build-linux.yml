@@ -51,9 +51,15 @@ jobs:
           done
 
       - name: Collect checkout-shaped output
+        shell: bash
         run: |
-          mkdir -p artifact-root/guest-platform
-          cp -R guest-platform/build artifact-root/guest-platform/build
+          set -euo pipefail
+          for architecture in aarch64 x86_64; do
+            for program in nativepipe-bootstrap nativepipe-guestd; do
+              install -Dm0755 "guest-platform/build/$architecture/$program" \
+                "artifact-root/guest-platform/build/$architecture/$program"
+            done
+          done
 
       - name: Upload Linux binaries
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0

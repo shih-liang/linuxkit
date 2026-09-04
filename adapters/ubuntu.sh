@@ -100,6 +100,17 @@ EOF
 		libgl1 libgles2 libegl1 libgl1-mesa-dri libegl-mesa0 libglx-mesa0 \
 		mesa-vulkan-drivers libwayland-server0 libxkbcommon0 \
 		libxcb1 libxcb-cursor0 xwayland
+	# Ubuntu currently does not publish xwayland-satellite, but probing the
+	# package index keeps this adapter correct when it becomes available. X11
+	# integration remains disabled until the distribution can install it;
+	# NativePipe does not download or execute a private replacement.
+	if run_in_target "$NP_TARGET_ROOT" /usr/bin/apt-cache show \
+		xwayland-satellite >/dev/null 2>&1; then
+		run_in_target "$NP_TARGET_ROOT" /usr/bin/apt-get install -y \
+			--no-install-recommends xwayland-satellite
+	else
+		echo "lighthouse installer: Ubuntu repository has no xwayland-satellite; X11 integration is unavailable" >&2
+	fi
 	rm -f "$NP_TARGET_ROOT/usr/sbin/policy-rc.d"
 	finish_rootfs
 	;;
