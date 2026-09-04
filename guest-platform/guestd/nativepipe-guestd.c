@@ -1850,6 +1850,7 @@ struct exec_session {
     int listen_fd;
     int master_fd;
     pid_t pid;
+    int terminal;
     uint8_t input[64 * 1024];
     size_t input_len;
 };
@@ -1903,12 +1904,16 @@ static int exec_consume_input(struct exec_session *s, const uint8_t *bytes, size
         } else if (frame[5] == NP_EXEC_RESIZE && length == 8) {
             apply_pty_winsize(s->master_fd, read_le32(payload), read_le32(payload + 4));
         } else if (frame[5] == NP_EXEC_END_INPUT && length == 0) {
-            struct termios attrs;
-            unsigned char eof = 4;
-            if (tcgetattr(s->master_fd, &attrs) == 0 &&
-                attrs.c_cc[VEOF] != _POSIX_VDISABLE)
-                eof = attrs.c_cc[VEOF];
-            if (np_write_full(s->master_fd, &eof, 1) < 0) return -1;
+            if (s->terminal) {
+                struct termios attrs;
+                unsigned char eof = 4;
+                if (tcgetattr(s->master_fd, &attrs) == 0 &&
+                    attrs.c_cc[VEOF] != _POSIX_VDISABLE)
+                    eof = attrs.c_cc[VEOF];
+                if (np_write_full(s->master_fd, &eof, 1) < 0) return -1;
+            } else if (shutdown(s->master_fd, SHUT_WR) < 0 && errno != ENOTCONN) {
+                return -1;
+            }
         } else if (frame[5] != NP_EXEC_EXIT) {
             return -1;
         }
@@ -1977,10 +1982,20 @@ static void *exec_session_thread(void *arg) {
                 break;
         }
         if (pfds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            /* Drain any remaining PTY output, then stop. */
-            ssize_t n = read(s->master_fd, buf, sizeof(buf));
-            if (n > 0)
-                exec_send_frame(sock, NP_EXEC_DATA, buf, (uint32_t)n);
+            /* POLLIN and POLLHUP commonly arrive together. The child may have
+             * much more than one 8 KiB block buffered at exit, so drain until
+             * the PTY/socket reports the actual EOF before sending status. */
+            for (;;) {
+                ssize_t n = read(s->master_fd, buf, sizeof(buf));
+                if (n > 0) {
+                    if (exec_send_frame(sock, NP_EXEC_DATA, buf, (uint32_t)n) < 0)
+                        break;
+                    continue;
+                }
+                if (n < 0 && errno == EINTR)
+                    continue;
+                break;
+            }
             break;
         }
         if (pfds[1].revents & POLLIN) {
@@ -2040,6 +2055,7 @@ static int listen_exec_port(uint32_t *port_out) {
 }
 
 static int exec_spec(const struct launch_req *r, uint32_t cols, uint32_t rows,
+                     int terminal,
                      int *pid_out, uint32_t *port_out) {
     if (!r || !r->exe || !r->exe[0] || !pid_out)
         return -1;
@@ -2050,8 +2066,16 @@ static int exec_spec(const struct launch_req *r, uint32_t cols, uint32_t rows,
     ws.ws_row = rows ? (unsigned short)rows : 24;
 
     int master = -1, slave = -1;
-    if (openpty(&master, &slave, NULL, NULL, &ws) < 0)
-        return -1;
+    if (terminal) {
+        if (openpty(&master, &slave, NULL, NULL, &ws) < 0)
+            return -1;
+    } else {
+        int pair[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) < 0)
+            return -1;
+        master = pair[0];
+        slave = pair[1];
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -2061,11 +2085,13 @@ static int exec_spec(const struct launch_req *r, uint32_t cols, uint32_t rows,
     }
     if (pid == 0) {
         close(master);
-        /* Equivalent to login_tty(slave): new session, controlling tty, stdio. */
-        if (setsid() < 0)
-            _exit(127);
-        if (ioctl(slave, TIOCSCTTY, 0) < 0) {
-            /* Non-fatal on some kernels if already controlling. */
+        if (terminal) {
+            /* Equivalent to login_tty(slave): new session, controlling tty, stdio. */
+            if (setsid() < 0)
+                _exit(127);
+            if (ioctl(slave, TIOCSCTTY, 0) < 0) {
+                /* Non-fatal on some kernels if already controlling. */
+            }
         }
         if (dup2(slave, 0) < 0 || dup2(slave, 1) < 0 || dup2(slave, 2) < 0)
             _exit(127);
@@ -2101,6 +2127,7 @@ static int exec_spec(const struct launch_req *r, uint32_t cols, uint32_t rows,
     sess->listen_fd = listen_fd;
     sess->master_fd = master;
     sess->pid = pid;
+    sess->terminal = terminal;
     sess->input_len = 0;
     pthread_t th;
     if (pthread_create(&th, NULL, exec_session_thread, sess) != 0) {
@@ -3105,9 +3132,10 @@ static int handle_run(int fd, const uint8_t *payload, size_t n) {
 static int handle_exec(int fd, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
-    uint32_t cols = 0, rows = 0;
+    uint32_t cols = 0, rows = 0, terminal = 0;
     if (rd_u64(payload, n, &off, &id) < 0 || rd_u32(payload, n, &off, &cols) < 0 ||
-        rd_u32(payload, n, &off, &rows) < 0)
+        rd_u32(payload, n, &off, &rows) < 0 ||
+        rd_u32(payload, n, &off, &terminal) < 0 || terminal > 1)
         return -1;
     struct launch_req req;
     memset(&req, 0, sizeof(req));
@@ -3117,7 +3145,7 @@ static int handle_exec(int fd, const uint8_t *payload, size_t n) {
     }
     int pid = 0;
     uint32_t port = 0;
-    int rc = exec_spec(&req, cols, rows, &pid, &port);
+    int rc = exec_spec(&req, cols, rows, terminal != 0, &pid, &port);
     launch_req_clear(&req);
     if (rc < 0)
         return send_bin_error(fd, id, (uint32_t)(errno ? errno : 22), "exec failed");
