@@ -23,7 +23,7 @@ TARGET_CFLAGS := -std=c11 -Icommon -O2 -static -s
 GUESTD_CFLAGS := $(TARGET_CFLAGS) -pthread -DNP_GUESTD_VERSION=\"$(VERSION)\"
 HOST_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -O2
 
-.PHONY: all build aarch64 x86_64 test test-license test-package package clean
+.PHONY: all build aarch64 x86_64 test test-license clean
 
 all: build
 build: aarch64 x86_64
@@ -85,39 +85,6 @@ test: \
 
 test-license:
 	$(PYTHON) scripts/check-license-inventory.py
-
-# Local defaults are deliberately non-release values. The tag workflow passes
-# the exact signed release tag and a repository-wide monotonic sequence.
-RELEASE_TAG ?= linuxkit-platform-v$(VERSION)-1
-RELEASE_SEQUENCE ?= 1
-SOURCE_REPOSITORY ?= shih-liang/linuxkit
-SOURCE_COMMIT ?= $(shell git rev-parse HEAD)
-SOURCE_DATE_EPOCH ?= $(shell git show -s --format=%ct $(SOURCE_COMMIT))
-
-package: build
-	$(PYTHON) scripts/package-platform.py \
-		--architecture aarch64 \
-		--build-dir build \
-		--output-dir dist \
-		--release-tag "$(RELEASE_TAG)" \
-		--release-sequence "$(RELEASE_SEQUENCE)" \
-		--source-repository "$(SOURCE_REPOSITORY)" \
-		--source-commit "$(SOURCE_COMMIT)" \
-		--source-date-epoch "$(SOURCE_DATE_EPOCH)"
-	$(PYTHON) scripts/package-platform.py \
-		--architecture x86_64 \
-		--build-dir build \
-		--output-dir dist \
-		--release-tag "$(RELEASE_TAG)" \
-		--release-sequence "$(RELEASE_SEQUENCE)" \
-		--source-repository "$(SOURCE_REPOSITORY)" \
-		--source-commit "$(SOURCE_COMMIT)" \
-		--source-date-epoch "$(SOURCE_DATE_EPOCH)"
-
-test-package: build test-license
-	$(PYTHON) tests/test_packaging.py \
-		--source-commit "$(SOURCE_COMMIT)" \
-		--source-date-epoch "$(SOURCE_DATE_EPOCH)"
 
 clean:
 	rm -rf build dist

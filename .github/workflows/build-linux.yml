@@ -1,0 +1,187 @@
+name: Build LinuxKit guest binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ["linuxkit-guest-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linuxkit-guest-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Guest platform
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+
+      - name: Test and build
+        run: |
+          make -C guest-platform test
+          make -C guest-platform test-license
+          make -C guest-platform build
+          python3 adapters/validate.py
+          python3 guest-platform/scripts/verify-environment-catalog.py --resources Resources
+
+      - name: Verify static target binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for architecture in aarch64 x86_64; do
+            for program in nativepipe-bootstrap nativepipe-guestd; do
+              binary="guest-platform/build/$architecture/$program"
+              test -x "$binary"
+              if readelf --program-headers "$binary" | grep -q INTERP; then
+                echo "dynamically linked guest binary: $binary" >&2
+                exit 1
+              fi
+            done
+          done
+
+      - name: Collect checkout-shaped output
+        run: |
+          mkdir -p artifact-root/guest-platform
+          cp -R guest-platform/build artifact-root/guest-platform/build
+
+      - name: Upload Linux binaries
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: linuxkit-linux
+          path: artifact-root
+          if-no-files-found: error
+          retention-days: 14
+
+  package-release:
+    name: Package GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+
+      - name: Download Linux binaries
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: linuxkit-linux
+          path: .release-input
+
+      - name: Create release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for architecture in aarch64 x86_64; do
+            root=".release-$architecture"
+            mkdir -p "$root/guest/bootstrap/dist" "$root/guest/guestd/dist"
+            install -m0755 \
+              ".release-input/guest-platform/build/$architecture/nativepipe-bootstrap" \
+              "$root/guest/bootstrap/dist/nativepipe-bootstrap-$architecture"
+            install -m0755 \
+              ".release-input/guest-platform/build/$architecture/nativepipe-guestd" \
+              "$root/guest/guestd/dist/nativepipe-guestd-$architecture"
+            install -m0644 guest-platform/guestd/VERSION \
+              guest-platform/guestd/nativepipe.interfaces \
+              guest-platform/guestd/nativepipe.modules "$root/guest/guestd/"
+            install -m0755 guest-platform/guestd/install.sh \
+              "$root/guest/guestd/install.sh"
+            mkdir -p "$root/guest/guestd/openrc" "$root/guest/guestd/systemd"
+            install -m0755 guest-platform/guestd/openrc/nativepipe-guestd \
+              "$root/guest/guestd/openrc/nativepipe-guestd"
+            install -m0644 guest-platform/guestd/systemd/nativepipe-guestd.service \
+              "$root/guest/guestd/systemd/nativepipe-guestd.service"
+            cp -R adapters "$root/InstallAdapters"
+            cp -R Resources "$root/Resources"
+            cp -R LICENSES "$root/LICENSES"
+            tar -C "$root" -czf "release/linuxkit-guest-$architecture.tar.gz" .
+          done
+          (cd release && sha256sum *.tar.gz > SHA256SUMS)
+
+      - name: Upload release files
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: linuxkit-guest-release
+          path: release
+          if-no-files-found: error
+
+  sign-release:
+    name: Sign GitHub release digest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package-release
+    runs-on: ubuntu-24.04
+    environment: platform-release
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: linuxkit-guest-release
+          path: release
+
+      - name: Sign digest
+        shell: bash
+        env:
+          PRIVATE_KEY: ${{ secrets.LIGHTHOUSE_PLATFORM_ED25519_PRIVATE_KEY }}
+          EXPECTED_PUBLIC_KEY_BASE64: ${{ vars.LIGHTHOUSE_RUNTIME_ED25519_PUBLIC_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "${PRIVATE_KEY:-}"
+          test -n "${EXPECTED_PUBLIC_KEY_BASE64:-}"
+          umask 077
+          printf '%s' "$PRIVATE_KEY" > private.pem
+          openssl pkey -in private.pem -pubout -out release/linuxkit-ed25519-public-key.pem
+          openssl pkey -in private.pem -pubout -outform DER -out public.der
+          test "$(tail -c 32 public.der | base64 -w0)" = "$EXPECTED_PUBLIC_KEY_BASE64"
+          openssl pkeyutl -sign -rawin -inkey private.pem \
+            -in release/SHA256SUMS -out release/SHA256SUMS.sig
+
+      - name: Upload signed release files
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: signed-linuxkit-guest-release
+          path: release
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: sign-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed release files
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: signed-linuxkit-guest-release
+          path: release
+
+      - name: Verify digest and signature
+        run: |
+          (cd release && sha256sum --check SHA256SUMS)
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey release/linuxkit-ed25519-public-key.pem \
+            -in release/SHA256SUMS -sigfile release/SHA256SUMS.sig
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

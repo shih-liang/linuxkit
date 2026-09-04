@@ -34,8 +34,7 @@ def matched(path: str, entry: dict[str, object]) -> bool:
 
 def platform_source_files() -> list[str]:
     paths = [
-        ".github/workflows/build-guest-platform.yml",
-        ".github/workflows/sign-guest-platform.yml",
+        ".github/workflows/build-linux.yml",
         "scripts/sign-installation-catalog.py",
     ]
     for relative in ("LICENSES", "Resources", "adapters", "guest-platform"):
@@ -76,8 +75,7 @@ def main() -> None:
     if "does not infer" not in str(original.get("licenseNotice", "")):
         fail("project-original rights notice is missing")
     for policy_path in (
-        ".github/workflows/build-guest-platform.yml",
-        ".github/workflows/sign-guest-platform.yml",
+        ".github/workflows/build-linux.yml",
         "scripts/sign-installation-catalog.py",
     ):
         matches = [entry["id"] for entry in entries if matched(policy_path, entry)]

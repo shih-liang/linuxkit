@@ -8,8 +8,7 @@
       "licenseNotice": "Copyright remains with the LightHouse project copyright holders. All rights reserved. This inventory does not infer or grant an open-source license for original files.",
       "licenseFile": "LICENSES/LightHouse-Original.txt",
       "coveredPaths": [
-        ".github/workflows/build-guest-platform.yml",
-        ".github/workflows/sign-guest-platform.yml",
+        ".github/workflows/build-linux.yml",
         "LICENSES/LightHouse-Original.txt",
         "LICENSES/README.md",
         "LICENSES/source-inventory.json",
