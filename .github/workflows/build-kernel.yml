@@ -149,6 +149,7 @@ jobs:
             --disable-shared \
             --enable-static \
             --disable-nls \
+            --without-tinfo \
             --without-python \
             --without-systemd \
             --without-udev
