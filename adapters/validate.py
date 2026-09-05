@@ -2,6 +2,7 @@
 import json
 import pathlib
 import re
+import subprocess
 from urllib.parse import urlparse
 
 root = pathlib.Path(__file__).resolve().parent
@@ -63,4 +64,25 @@ assert "mesa-dri-drivers" in fedora_adapter
 assert "xcb-util-cursor" in fedora_adapter
 assert "mesa vulkan-virtio" in arch_adapter
 assert "xcb-util-cursor" in arch_adapter
+
+# Check the bytes actually written to binfmt_misc. printf %b would emit NULs,
+# truncating the ELF match before e_machine and hijacking native ARM64 programs.
+common_adapter = (root / "common.sh").read_text()
+registration = re.search(r"printf '[^']+' ':rosetta:[^']+'", common_adapter)
+assert registration is not None
+wire = subprocess.check_output(["sh", "-c", registration.group(0)])
+assert b"\x00" not in wire, "binfmt_misc requires escaped NUL bytes"
+fields = wire.decode("ascii").strip().split(":")
+assert fields[:4] == ["", "rosetta", "M", ""]
+magic, mask = [value.encode("ascii").decode("unicode_escape").encode("latin1")
+               for value in fields[4:6]]
+assert len(magic) == len(mask) == 20
+for machine, expected in ((62, True), (183, False)):
+    for elf_type in (2, 3):
+        header = bytearray(magic)
+        header[16:18] = elf_type.to_bytes(2, "little")
+        header[18:20] = machine.to_bytes(2, "little")
+        matches = all((byte & bits) == (want & bits)
+                      for byte, want, bits in zip(header, magic, mask))
+        assert matches == expected, "Rosetta must match only x86-64 ELF files"
 print(f"validated {len(catalog['distributions'])} dynamic installation sources")

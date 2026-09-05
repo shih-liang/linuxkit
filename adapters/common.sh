@@ -29,8 +29,10 @@ ensure_install_network()
 {
 	for interface_path in /sys/class/net/*; do
 		interface_name=${interface_path##*/}
-		[ "$interface_name" = lo ] && continue
-		ip link set dev "$interface_name" up
+		# Built-in bonding/tunnel drivers also create interfaces, but they
+		# have no backing device and cannot obtain an install-time DHCP lease.
+		[ -e "$interface_path/device" ] || continue
+		ip link set dev "$interface_name" up || continue
 		if udhcpc -q -n -t 5 -T 3 -i "$interface_name"; then
 			[ -s /etc/resolv.conf ] || fail "DHCP returned no DNS servers"
 			return 0
@@ -103,7 +105,7 @@ unit: sectors
 
 start=2048, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="nativepipe-root"
 EOF
-	/sbin/partprobe "$NP_TARGET_DISK"
+	partprobe "$NP_TARGET_DISK"
 	partition=$(partition_path "$NP_TARGET_DISK")
 	i=0
 	while [ ! -b "$partition" ]; do
@@ -128,7 +130,7 @@ grow_root_disk()
 	/sbin/sfdisk --force -N 1 "$NP_TARGET_DISK" <<'EOF'
 ,
 EOF
-	/sbin/partprobe "$NP_TARGET_DISK"
+	partprobe "$NP_TARGET_DISK"
 	i=0
 	while [ "$i" -lt 100 ]; do
 		sectors=$(cat "/sys/class/block/${partition##*/}/size" 2>/dev/null || true)
@@ -259,7 +261,7 @@ if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
 	mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
 fi
 [ -e /proc/sys/fs/binfmt_misc/rosetta ] ||
-	printf '%b\n' ':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/run/rosetta/rosetta:POCF' \
+	printf '%s\n' ':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/run/rosetta/rosetta:POCF' \
 		> /proc/sys/fs/binfmt_misc/register
 EOF
 	chmod 0755 "$root/usr/libexec/nativepipe/mount-rosetta"
@@ -313,8 +315,8 @@ finish_rootfs()
 	printf 'nativepipe\n' > "$root/etc/hostname"
 	printf 'LABEL=nativepipe-root / ext4 defaults 0 1\n' > "$root/etc/fstab"
 	: > "$root/etc/machine-id"
-	configure_network "$root"
 	create_default_user "$root" nativepipe
+	configure_network "$root"
 	install_guest_agent "$root"
 	install_rosetta_support "$root"
 	stage_software_install "$root"

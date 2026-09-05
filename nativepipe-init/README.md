@@ -62,6 +62,11 @@ distribution-specific systemd, device-manager and account baseline inside the
 new root before handoff. Target runtime mounts are always unwound, and an
 interrupted install can safely rewrite the installer-owned disk on retry.
 
+Arch Linux ARM initializes and populates the rootfs's pacman keyring before
+installing packages. Its temporary GPG agent is stopped before the chroot
+runtime mounts are released. Init supplies `/dev/fd` and the standard I/O links
+after mounting devtmpfs, so Bash process substitution works in those chroots.
+
 `../adapters/catalog.json` is the installation source of truth consumed by the
 LightHouse creation assistant. It identifies the rootfs archive, checksum,
 adapter and selectable software for Ubuntu, Fedora and Arch Linux ARM. The
@@ -81,3 +86,26 @@ updates that file and `KERNEL_VERSION` together in one pull request and rejects
 a Kata configuration from a different Linux series; BusyBox `x.y.0`
 development releases are excluded until an upstream stable bug-fix release
 exists.
+
+## Independent GitHub builds
+
+`kernel-image.yml` builds only the ARM64 16 KiB kernel and its configuration,
+symbols and module ABI files. `build-initramfs.yml` independently builds and
+tests the static recovery tools; it does not download or compile Linux. Either
+workflow can be run manually to obtain its own Actions artifact.
+
+`build-kernel.yml` assembles their outputs into the existing paired release
+format. A new kernel tag builds both jobs in parallel. For an initramfs-only
+change, run the publication workflow with a new `release_tag` and an existing
+`kernel_release`, for example:
+
+```sh
+gh workflow run build-kernel.yml --ref main \
+  -f release_tag=lighthouse-kernel-v6.18.48-8 \
+  -f kernel_release=lighthouse-kernel-v6.18.48-4
+```
+
+Kernel reuse requires the same Linux version, `config-aarch64` and Kata
+configuration revision, and verifies the downloaded kernel artifacts against
+the release checksums. Leave `kernel_release` empty to rebuild Linux. Neither
+path builds the kernel or initramfs on the local macOS host.

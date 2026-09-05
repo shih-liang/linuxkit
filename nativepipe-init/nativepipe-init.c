@@ -119,6 +119,25 @@ static int mount_once(const char *source, const char *target, const char *filesy
     return -1;
 }
 
+static const struct {
+    const char *name;
+    const char *target;
+} standard_fd_links[] = {
+    {"fd", "/proc/self/fd"},
+    {"stdin", "/proc/self/fd/0"},
+    {"stdout", "/proc/self/fd/1"},
+    {"stderr", "/proc/self/fd/2"},
+};
+
+static int setup_fd_links(int directory) {
+    for (size_t i = 0; i < sizeof(standard_fd_links) / sizeof(standard_fd_links[0]); i++) {
+        if (symlinkat(standard_fd_links[i].target, directory,
+                      standard_fd_links[i].name) < 0 && errno != EEXIST)
+            return -1;
+    }
+    return 0;
+}
+
 static void setup_runtime(void) {
     umask(022);
     signal(SIGPIPE, SIG_IGN);
@@ -139,6 +158,14 @@ static void setup_runtime(void) {
             close(console);
     }
     mount_once("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+    // devtmpfs supplies device nodes, not these userspace links. Shell process
+    // substitution (including pacman-key) needs them inside installation chroots.
+    int device_directory = open("/dev", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (device_directory < 0 || setup_fd_links(device_directory) < 0) {
+        log_errno("create /dev standard file descriptor links");
+        _exit(1);
+    }
+    close(device_directory);
     mount_once("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
     mount_once("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755");
     mount_once("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
@@ -1445,6 +1472,26 @@ static int parse_boot_configuration(char *command_line, bool *maintenance,
 }
 
 static int self_test(const char *program_path) {
+    char device_path[] = "/tmp/nativepipe-init-dev.XXXXXX";
+    if (!mkdtemp(device_path))
+        return 1;
+    int device_directory = open(device_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bool links_ok = device_directory >= 0 && setup_fd_links(device_directory) == 0 &&
+                    setup_fd_links(device_directory) == 0;
+    for (size_t i = 0; i < sizeof(standard_fd_links) / sizeof(standard_fd_links[0]); i++) {
+        char target[64] = {0};
+        ssize_t count = readlinkat(device_directory, standard_fd_links[i].name,
+                                   target, sizeof(target) - 1);
+        if (count < 0 || strcmp(target, standard_fd_links[i].target) != 0)
+            links_ok = false;
+        unlinkat(device_directory, standard_fd_links[i].name, 0);
+    }
+    if (device_directory >= 0)
+        close(device_directory);
+    rmdir(device_path);
+    if (!links_ok)
+        return 1;
+
     uint8_t payload[] = {
         'N', 'P', 'I', 'C', 1, 0, 0, 0, 0, 0, 0, 0,
         NP_ACTION_INSTALL, 1, 0, 0,

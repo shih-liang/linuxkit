@@ -33,16 +33,16 @@ fi
 ip link set dev "$interface" up
 case ${1:-} in
 deconfig)
-	ip addr flush dev "$interface"
+	ip -4 addr flush dev "$interface"
 	;;
 bound|renew)
 	: "${ip:?udhcpc did not provide an address}"
 	prefix=$(prefix_length "${subnet:-255.255.255.0}")
-	ip addr flush dev "$interface"
-	ip addr add "$ip/$prefix" dev "$interface"
-	ip route del default dev "$interface" 2>/dev/null || true
+	ip -4 addr flush dev "$interface"
+	ip -4 addr add "$ip/$prefix" dev "$interface"
+	ip -4 route del default dev "$interface" 2>/dev/null || true
 	set -- ${router:-}
-	[ "$#" -eq 0 ] || ip route add default via "$1" dev "$interface"
+	[ "$#" -eq 0 ] || ip -4 route add default via "$1" dev "$interface"
 	: > /etc/resolv.conf
 	[ -z "${domain:-}" ] || printf 'search %s\n' "$domain" >> /etc/resolv.conf
 	for server in ${dns:-}; do
