@@ -1,0 +1,260 @@
+name: Build ARM64 initramfs
+
+on:
+  workflow_call:
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Read source versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          source DEPENDENCY_VERSIONS
+          kernel_version="$(tr -d '[:space:]' < KERNEL_VERSION)"
+          for value in "$kernel_version" "$BUSYBOX_VERSION" "$E2FSPROGS_VERSION" "$KATA_CONFIG_REF"; do
+            [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          done
+          [[ "$UTIL_LINUX_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+          for value in "$BUSYBOX_SHA256" "$E2FSPROGS_SHA256" "$UTIL_LINUX_SHA256"; do
+            [[ "$value" =~ ^[0-9a-f]{64}$ ]]
+          done
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          {
+            echo "KERNEL_VERSION=$kernel_version"
+            echo "SOURCE_DATE_EPOCH=$source_date_epoch"
+            echo "KBUILD_BUILD_TIMESTAMP=@$source_date_epoch"
+            echo "KBUILD_BUILD_USER=lighthouse"
+            echo "KBUILD_BUILD_HOST=github-actions"
+            cat DEPENDENCY_VERSIONS
+          } >> "$GITHUB_ENV"
+
+      - name: Install initramfs build dependencies
+        run: |
+          # GitHub's amd64 runner mirrors do not carry arm64 packages.  Keep
+          # them amd64-only and obtain target development archives from
+          # Ubuntu's official ports repository.
+          sudo dpkg --add-architecture arm64
+          sudo sed -i '/^URIs: /a Architectures: amd64' \
+            /etc/apt/sources.list.d/ubuntu.sources
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: http://ports.ubuntu.com/ubuntu-ports' \
+            'Suites: noble noble-updates noble-security' \
+            'Components: main universe' \
+            'Architectures: arm64' \
+            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+            | sudo tee /etc/apt/sources.list.d/ubuntu-ports-arm64.sources >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential bzip2 cpio gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            libncurses-dev:arm64 \
+            qemu-user xz-utils
+          test -f /usr/lib/aarch64-linux-gnu/libncursesw.a
+          test -f /usr/lib/aarch64-linux-gnu/libtinfo.a
+
+      - name: Build static BusyBox
+        run: |
+          set -eu
+          busybox_archive="busybox-${BUSYBOX_VERSION}.tar.bz2"
+          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
+            --retry-max-time 300 --retry-all-errors \
+            "https://busybox.net/downloads/${busybox_archive}" \
+            --output "${busybox_archive}"
+          echo "${BUSYBOX_SHA256}  ${busybox_archive}" \
+            | sha256sum --check --strict -
+          tar --extract --bzip2 --file "${busybox_archive}"
+          cp busybox-initramfs.config "busybox-${BUSYBOX_VERSION}/.config"
+          make -C "busybox-${BUSYBOX_VERSION}" oldconfig </dev/null
+          busybox_config="busybox-${BUSYBOX_VERSION}/.config"
+          grep -q '^CONFIG_STATIC=y$' "$busybox_config"
+          grep -q '^CONFIG_ASH=y$' "$busybox_config"
+          grep -q '^CONFIG_FEATURE_SH_MATH=y$' "$busybox_config"
+          grep -q '^CONFIG_FEATURE_SH_MATH_64=y$' "$busybox_config"
+          grep -q '^CONFIG_FLOAT_DURATION=y$' "$busybox_config"
+          grep -q '^CONFIG_FEATURE_FANCY_SLEEP=y$' "$busybox_config"
+          grep -q '^CONFIG_MOUNT=y$' "$busybox_config"
+          grep -q '^CONFIG_SWITCH_ROOT=y$' "$busybox_config"
+          grep -q '^CONFIG_UDHCPC=y$' "$busybox_config"
+          grep -q '^# CONFIG_TC is not set$' "$busybox_config"
+          grep -q '^# CONFIG_BLKID is not set$' "$busybox_config"
+          grep -q '^# CONFIG_FSCK is not set$' "$busybox_config"
+          grep -q '^# CONFIG_MKFS_EXT2 is not set$' "$busybox_config"
+          make -C "busybox-${BUSYBOX_VERSION}" -j"$(nproc)" \
+            ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE"
+
+      - name: Build static util-linux disk tools
+        run: |
+          set -eu
+          archive="util-linux-${UTIL_LINUX_VERSION}.tar.xz"
+          series="$(printf '%s' "$UTIL_LINUX_VERSION" | cut -d. -f1,2)"
+          base="https://www.kernel.org/pub/linux/utils/util-linux/v${series}"
+          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
+            --retry-max-time 300 --retry-all-errors \
+            "${base}/${archive}" --output "${archive}"
+          echo "${UTIL_LINUX_SHA256}  ${archive}" \
+            | sha256sum --check --strict -
+          tar --extract --file "${archive}"
+          mkdir util-linux-build
+          cd util-linux-build
+          "../util-linux-${UTIL_LINUX_VERSION}/configure" \
+            --host="${CROSS_COMPILE%-}" \
+            --disable-all-programs \
+            --enable-blkid \
+            --enable-fdisks \
+            --enable-libblkid \
+            --enable-libfdisk \
+            --enable-libsmartcols \
+            --enable-libuuid \
+            --enable-static-programs=blkid,sfdisk \
+            --disable-shared \
+            --enable-static \
+            --disable-nls \
+            --without-tinfo \
+            --without-python \
+            --without-systemd \
+            --without-udev
+          make -j"$(nproc)" blkid.static sfdisk.static
+          test -x blkid.static
+          test -x sfdisk.static
+          mkdir -p ../initramfs-root/sbin
+          cp blkid.static ../initramfs-root/sbin/blkid
+          cp sfdisk.static ../initramfs-root/sbin/sfdisk
+          for tool in blkid sfdisk; do
+            "${CROSS_COMPILE}strip" "../initramfs-root/sbin/$tool"
+            if "${CROSS_COMPILE}readelf" -l "../initramfs-root/sbin/$tool" \
+              | grep -q INTERP; then
+              echo "util-linux $tool must be a static ELF." >&2
+              exit 1
+            fi
+          done
+
+      - name: Build static ext4 tools
+        run: |
+          set -eu
+          archive="e2fsprogs-${E2FSPROGS_VERSION}.tar.xz"
+          base="https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${E2FSPROGS_VERSION}"
+          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
+            --retry-max-time 300 --retry-all-errors \
+            "${base}/${archive}" --output "${archive}"
+          echo "${E2FSPROGS_SHA256}  ${archive}" \
+            | sha256sum --check --strict -
+          tar --extract --file "${archive}"
+          mkdir e2fsprogs-build
+          cd e2fsprogs-build
+          LDFLAGS=-static "../e2fsprogs-${E2FSPROGS_VERSION}/configure" \
+            --host="${CROSS_COMPILE%-}" \
+            --prefix=/usr \
+            --enable-libblkid \
+            --disable-defrag \
+            --disable-uuidd \
+            --disable-nls \
+            --disable-fuse2fs \
+            --without-libarchive \
+            --without-systemd-unit-dir
+          make -j"$(nproc)" static-progs
+          mkdir -p ../initramfs-root/sbin ../initramfs-root/etc
+          for specification in \
+            'misc/mke2fs.static:mke2fs' \
+            'e2fsck/e2fsck.static:e2fsck' \
+            'resize/resize2fs.static:resize2fs' \
+            'misc/tune2fs.static:tune2fs' \
+            'misc/dumpe2fs.static:dumpe2fs'; do
+            source="${specification%%:*}"
+            destination="${specification#*:}"
+            test -x "$source"
+            cp "$source" "../initramfs-root/sbin/$destination"
+            "${CROSS_COMPILE}strip" "../initramfs-root/sbin/$destination"
+            if "${CROSS_COMPILE}readelf" -l "../initramfs-root/sbin/$destination" \
+              | grep -q INTERP; then
+              echo "$destination must be a static ELF." >&2
+              exit 1
+            fi
+          done
+          cp misc/mke2fs.conf ../initramfs-root/etc/mke2fs.conf
+          cd ../initramfs-root/sbin
+          ln -s mke2fs mkfs.ext2
+          ln -s mke2fs mkfs.ext3
+          ln -s mke2fs mkfs.ext4
+          ln -s e2fsck fsck.ext2
+          ln -s e2fsck fsck.ext3
+          ln -s e2fsck fsck.ext4
+
+      - name: Compile and self-test nativepipe-init
+        run: |
+          set -eu
+          cc -O2 -Wall -Wextra -Werror \
+            nativepipe-init/nativepipe-init.c -o nativepipe-init-self-test
+          ./nativepipe-init-self-test --self-test
+          mkdir -p initramfs-root/sbin
+          "$CROSS_COMPILE"gcc -static -Os -Wall -Wextra -Werror \
+            nativepipe-init/nativepipe-init.c \
+            -o initramfs-root/sbin/nativepipe-init
+          "$CROSS_COMPILE"strip initramfs-root/sbin/nativepipe-init
+          if "$CROSS_COMPILE"readelf -l initramfs-root/sbin/nativepipe-init | grep -q INTERP; then
+            echo 'nativepipe-init must be a static ELF.' >&2
+            exit 1
+          fi
+
+      - name: Assemble VZ-compatible initramfs
+        run: |
+          set -eu
+          make -C "busybox-${BUSYBOX_VERSION}" \
+            ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+            CONFIG_PREFIX="$PWD/initramfs-root" install
+          mkdir -p initramfs-root/usr/share/udhcpc
+          cp adapters/udhcpc.sh initramfs-root/usr/share/udhcpc/default.script
+          chmod 0755 initramfs-root/usr/share/udhcpc/default.script
+          ln -s /proc/mounts initramfs-root/etc/mtab
+          ln -s sbin/nativepipe-init initramfs-root/init
+          test -x initramfs-root/bin/sh
+          test -x initramfs-root/bin/mount
+          test -x initramfs-root/bin/umount
+          test -x initramfs-root/sbin/switch_root
+          test -x initramfs-root/usr/share/udhcpc/default.script
+          test "$(readlink initramfs-root/sbin/switch_root)" = '../bin/busybox'
+          for tool in nativepipe-init mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid sfdisk; do
+            test -x "initramfs-root/sbin/$tool"
+          done
+          mkdir -p initramfs-root/dev initramfs-root/proc initramfs-root/sys \
+            initramfs-root/run initramfs-root/newroot initramfs-root/tmp
+          chmod 1777 initramfs-root/tmp
+          sh scripts/test-initramfs-tools.sh "$PWD/initramfs-root"
+          find initramfs-root -exec touch -h --date="@$SOURCE_DATE_EPOCH" {} +
+          (
+            cd initramfs-root
+            find . -print0 | LC_ALL=C sort -z \
+              | cpio --null --create --format=newc --owner=0:0 --reproducible
+          ) > "lighthouse-initramfs-${KERNEL_VERSION}-arm64.cpio"
+          gzip --no-name --best --stdout \
+            "lighthouse-initramfs-${KERNEL_VERSION}-arm64.cpio" \
+            > "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
+          gzip --test "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
+          test "$(gzip --decompress --stdout \
+            "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" \
+            | dd bs=6 count=1 2>/dev/null)" = "070701"
+          rm "lighthouse-initramfs-${KERNEL_VERSION}-arm64.cpio"
+
+      - name: Upload initramfs output
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: lighthouse-initramfs-arm64
+          path: lighthouse-initramfs-*-arm64.img
+          if-no-files-found: error

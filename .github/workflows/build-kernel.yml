@@ -1,728 +1,137 @@
-name: Build LightHouse ARM64 16K kernel and initramfs
+name: Publish LightHouse kernel and initramfs
 
 on:
   push:
-    tags:
-      - 'lighthouse-kernel-v*'
+    tags: ['lighthouse-kernel-v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: New lighthouse-kernel-v<version>-<revision> tag
+        required: true
+        type: string
+      kernel_release:
+        description: Reuse kernel from this verified release (empty builds a new kernel)
+        required: false
+        default: ""
+        type: string
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
-  group: kernel-release-${{ github.ref }}
+  group: kernel-release-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
-env:
-  ARCH: arm64
-  CROSS_COMPILE: aarch64-linux-gnu-
-
 jobs:
-  build:
-    name: Build ARM64 16 KiB kernel
+  prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    permissions:
-      contents: read
     outputs:
-      kernel_version: ${{ steps.versions.outputs.kernel_version }}
-      release_revision: ${{ steps.versions.outputs.release_revision }}
+      tag: ${{ steps.release.outputs.tag }}
+      kernel_version: ${{ steps.release.outputs.kernel_version }}
+      revision: ${{ steps.release.outputs.revision }}
     steps:
       - name: Check out configuration
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
-      - name: Read source versions
-        id: versions
+      - name: Validate release
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           kernel_version="$(tr -d '[:space:]' < KERNEL_VERSION)"
-          if ! printf '%s\n' "$kernel_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Invalid KERNEL_VERSION: $kernel_version" >&2
+          [[ "$kernel_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          prefix="lighthouse-kernel-v${kernel_version}-"
+          revision="${RELEASE_TAG#"$prefix"}"
+          [[ "$RELEASE_TAG" != "$revision" && "$revision" =~ ^[1-9][0-9]*$ ]]
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists." >&2
             exit 1
           fi
-          release_prefix="lighthouse-kernel-v${kernel_version}-"
-          release_revision="${GITHUB_REF_NAME#"$release_prefix"}"
-          if [ "$GITHUB_REF_NAME" = "$release_revision" ] \
-            || ! printf '%s\n' "$release_revision" | grep -Eq '^[1-9][0-9]*$'; then
-            echo "Release tag $GITHUB_REF_NAME must match ${release_prefix}<positive revision>." >&2
-            exit 1
-          fi
-          source_date_epoch="$(git show -s --format=%ct HEAD)"
-          source DEPENDENCY_VERSIONS
-          for name in BUSYBOX_VERSION E2FSPROGS_VERSION KATA_CONFIG_REF; do
-            value="${!name}"
-            if ! printf '%s\n' "$value" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-              echo "Invalid $name: $value" >&2
-              exit 1
-            fi
-          done
-          if ! printf '%s\n' "$UTIL_LINUX_VERSION" \
-            | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
-            echo "Invalid UTIL_LINUX_VERSION: $UTIL_LINUX_VERSION" >&2
-            exit 1
-          fi
-          for name in BUSYBOX_SHA256 E2FSPROGS_SHA256 UTIL_LINUX_SHA256; do
-            value="${!name}"
-            if ! printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{64}$'; then
-              echo "Invalid $name" >&2
-              exit 1
-            fi
-          done
           {
-            echo "KERNEL_VERSION=$kernel_version"
-            echo "RELEASE_REVISION=$release_revision"
-            echo "SOURCE_DATE_EPOCH=$source_date_epoch"
-            echo "KBUILD_BUILD_TIMESTAMP=@$source_date_epoch"
-            echo "KBUILD_BUILD_USER=lighthouse"
-            echo "KBUILD_BUILD_HOST=github-actions"
-            echo "BUSYBOX_VERSION=$BUSYBOX_VERSION"
-            echo "BUSYBOX_SHA256=$BUSYBOX_SHA256"
-            echo "E2FSPROGS_VERSION=$E2FSPROGS_VERSION"
-            echo "E2FSPROGS_SHA256=$E2FSPROGS_SHA256"
-            echo "UTIL_LINUX_VERSION=$UTIL_LINUX_VERSION"
-            echo "UTIL_LINUX_SHA256=$UTIL_LINUX_SHA256"
-            echo "KATA_CONFIG_REF=$KATA_CONFIG_REF"
-          } >> "$GITHUB_ENV"
-          {
+            echo "tag=$RELEASE_TAG"
             echo "kernel_version=$kernel_version"
-            echo "release_revision=$release_revision"
+            echo "revision=$revision"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install kernel build dependencies
-        run: |
-          # GitHub's amd64 runner mirrors do not carry arm64 packages.  Keep
-          # them amd64-only and obtain target development archives from
-          # Ubuntu's official ports repository.
-          sudo dpkg --add-architecture arm64
-          sudo sed -i '/^URIs: /a Architectures: amd64' \
-            /etc/apt/sources.list.d/ubuntu.sources
-          printf '%s\n' \
-            'Types: deb' \
-            'URIs: http://ports.ubuntu.com/ubuntu-ports' \
-            'Suites: noble noble-updates noble-security' \
-            'Components: main universe' \
-            'Architectures: arm64' \
-            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
-            | sudo tee /etc/apt/sources.list.d/ubuntu-ports-arm64.sources >/dev/null
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            bc bison build-essential bzip2 cpio flex gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross \
-            libncurses-dev:arm64 \
-            libelf-dev libssl-dev pahole python3 qemu-user rsync xz-utils
-          test -f /usr/lib/aarch64-linux-gnu/libncursesw.a
-          test -f /usr/lib/aarch64-linux-gnu/libtinfo.a
+  kernel:
+    needs: prepare
+    uses: ./.github/workflows/kernel-image.yml
+    with:
+      reuse_release: ${{ inputs.kernel_release || '' }}
 
-      - name: Build static BusyBox
-        run: |
-          set -eu
-          busybox_archive="busybox-${BUSYBOX_VERSION}.tar.bz2"
-          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
-            --retry-max-time 300 --retry-all-errors \
-            "https://busybox.net/downloads/${busybox_archive}" \
-            --output "${busybox_archive}"
-          echo "${BUSYBOX_SHA256}  ${busybox_archive}" \
-            | sha256sum --check --strict -
-          tar --extract --bzip2 --file "${busybox_archive}"
-          cp busybox-initramfs.config "busybox-${BUSYBOX_VERSION}/.config"
-          make -C "busybox-${BUSYBOX_VERSION}" oldconfig </dev/null
-          busybox_config="busybox-${BUSYBOX_VERSION}/.config"
-          grep -q '^CONFIG_STATIC=y$' "$busybox_config"
-          grep -q '^CONFIG_ASH=y$' "$busybox_config"
-          grep -q '^CONFIG_FEATURE_SH_MATH=y$' "$busybox_config"
-          grep -q '^CONFIG_FEATURE_SH_MATH_64=y$' "$busybox_config"
-          grep -q '^CONFIG_FLOAT_DURATION=y$' "$busybox_config"
-          grep -q '^CONFIG_FEATURE_FANCY_SLEEP=y$' "$busybox_config"
-          grep -q '^CONFIG_MOUNT=y$' "$busybox_config"
-          grep -q '^CONFIG_SWITCH_ROOT=y$' "$busybox_config"
-          grep -q '^CONFIG_UDHCPC=y$' "$busybox_config"
-          grep -q '^# CONFIG_TC is not set$' "$busybox_config"
-          grep -q '^# CONFIG_BLKID is not set$' "$busybox_config"
-          grep -q '^# CONFIG_FSCK is not set$' "$busybox_config"
-          grep -q '^# CONFIG_MKFS_EXT2 is not set$' "$busybox_config"
-          make -C "busybox-${BUSYBOX_VERSION}" -j"$(nproc)" \
-            ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE"
-
-      - name: Build static util-linux disk tools
-        run: |
-          set -eu
-          archive="util-linux-${UTIL_LINUX_VERSION}.tar.xz"
-          series="$(printf '%s' "$UTIL_LINUX_VERSION" | cut -d. -f1,2)"
-          base="https://www.kernel.org/pub/linux/utils/util-linux/v${series}"
-          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
-            --retry-max-time 300 --retry-all-errors \
-            "${base}/${archive}" --output "${archive}"
-          echo "${UTIL_LINUX_SHA256}  ${archive}" \
-            | sha256sum --check --strict -
-          tar --extract --file "${archive}"
-          mkdir util-linux-build
-          cd util-linux-build
-          "../util-linux-${UTIL_LINUX_VERSION}/configure" \
-            --host="${CROSS_COMPILE%-}" \
-            --disable-all-programs \
-            --enable-blkid \
-            --enable-fdisks \
-            --enable-libblkid \
-            --enable-libfdisk \
-            --enable-libsmartcols \
-            --enable-libuuid \
-            --enable-static-programs=blkid,sfdisk \
-            --disable-shared \
-            --enable-static \
-            --disable-nls \
-            --without-tinfo \
-            --without-python \
-            --without-systemd \
-            --without-udev
-          make -j"$(nproc)" blkid.static sfdisk.static
-          test -x blkid.static
-          test -x sfdisk.static
-          mkdir -p ../initramfs-root/sbin
-          cp blkid.static ../initramfs-root/sbin/blkid
-          cp sfdisk.static ../initramfs-root/sbin/sfdisk
-          for tool in blkid sfdisk; do
-            "${CROSS_COMPILE}strip" "../initramfs-root/sbin/$tool"
-            if "${CROSS_COMPILE}readelf" -l "../initramfs-root/sbin/$tool" \
-              | grep -q INTERP; then
-              echo "util-linux $tool must be a static ELF." >&2
-              exit 1
-            fi
-          done
-
-      - name: Build static ext4 tools
-        run: |
-          set -eu
-          archive="e2fsprogs-${E2FSPROGS_VERSION}.tar.xz"
-          base="https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${E2FSPROGS_VERSION}"
-          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
-            --retry-max-time 300 --retry-all-errors \
-            "${base}/${archive}" --output "${archive}"
-          echo "${E2FSPROGS_SHA256}  ${archive}" \
-            | sha256sum --check --strict -
-          tar --extract --file "${archive}"
-          mkdir e2fsprogs-build
-          cd e2fsprogs-build
-          LDFLAGS=-static "../e2fsprogs-${E2FSPROGS_VERSION}/configure" \
-            --host="${CROSS_COMPILE%-}" \
-            --prefix=/usr \
-            --enable-libblkid \
-            --disable-defrag \
-            --disable-uuidd \
-            --disable-nls \
-            --disable-fuse2fs \
-            --without-libarchive \
-            --without-systemd-unit-dir
-          make -j"$(nproc)" static-progs
-          mkdir -p ../initramfs-root/sbin ../initramfs-root/etc
-          for specification in \
-            'misc/mke2fs.static:mke2fs' \
-            'e2fsck/e2fsck.static:e2fsck' \
-            'resize/resize2fs.static:resize2fs' \
-            'misc/tune2fs.static:tune2fs' \
-            'misc/dumpe2fs.static:dumpe2fs'; do
-            source="${specification%%:*}"
-            destination="${specification#*:}"
-            test -x "$source"
-            cp "$source" "../initramfs-root/sbin/$destination"
-            "${CROSS_COMPILE}strip" "../initramfs-root/sbin/$destination"
-            if "${CROSS_COMPILE}readelf" -l "../initramfs-root/sbin/$destination" \
-              | grep -q INTERP; then
-              echo "$destination must be a static ELF." >&2
-              exit 1
-            fi
-          done
-          cp misc/mke2fs.conf ../initramfs-root/etc/mke2fs.conf
-          cd ../initramfs-root/sbin
-          ln -s mke2fs mkfs.ext2
-          ln -s mke2fs mkfs.ext3
-          ln -s mke2fs mkfs.ext4
-          ln -s e2fsck fsck.ext2
-          ln -s e2fsck fsck.ext3
-          ln -s e2fsck fsck.ext4
-
-      - name: Compile and self-test nativepipe-init
-        run: |
-          set -eu
-          cc -O2 -Wall -Wextra -Werror \
-            nativepipe-init/nativepipe-init.c -o nativepipe-init-self-test
-          ./nativepipe-init-self-test --self-test
-          mkdir -p initramfs-root/sbin
-          "$CROSS_COMPILE"gcc -static -Os -Wall -Wextra -Werror \
-            nativepipe-init/nativepipe-init.c \
-            -o initramfs-root/sbin/nativepipe-init
-          "$CROSS_COMPILE"strip initramfs-root/sbin/nativepipe-init
-          if "$CROSS_COMPILE"readelf -l initramfs-root/sbin/nativepipe-init | grep -q INTERP; then
-            echo 'nativepipe-init must be a static ELF.' >&2
-            exit 1
-          fi
-
-      - name: Assemble VZ-compatible initramfs
-        run: |
-          set -eu
-          make -C "busybox-${BUSYBOX_VERSION}" \
-            ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
-            CONFIG_PREFIX="$PWD/initramfs-root" install
-          mkdir -p initramfs-root/usr/share/udhcpc
-          cp adapters/udhcpc.sh initramfs-root/usr/share/udhcpc/default.script
-          chmod 0755 initramfs-root/usr/share/udhcpc/default.script
-          ln -s /proc/mounts initramfs-root/etc/mtab
-          ln -s sbin/nativepipe-init initramfs-root/init
-          test -x initramfs-root/bin/sh
-          test -x initramfs-root/bin/mount
-          test -x initramfs-root/bin/umount
-          test -x initramfs-root/sbin/switch_root
-          test -x initramfs-root/usr/share/udhcpc/default.script
-          test "$(readlink initramfs-root/sbin/switch_root)" = '../bin/busybox'
-          for tool in nativepipe-init mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid sfdisk; do
-            test -x "initramfs-root/sbin/$tool"
-          done
-          mkdir -p initramfs-root/dev initramfs-root/proc initramfs-root/sys \
-            initramfs-root/run initramfs-root/newroot initramfs-root/tmp
-          chmod 1777 initramfs-root/tmp
-          sh scripts/test-initramfs-tools.sh "$PWD/initramfs-root"
-          find initramfs-root -exec touch -h --date="@$SOURCE_DATE_EPOCH" {} +
-          (
-            cd initramfs-root
-            find . -print0 | LC_ALL=C sort -z \
-              | cpio --null --create --format=newc --owner=0:0 --reproducible
-          ) > "lighthouse-initramfs-${KERNEL_VERSION}-arm64.cpio"
-          gzip --no-name --best --stdout \
-            "lighthouse-initramfs-${KERNEL_VERSION}-arm64.cpio" \
-            > "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
-          gzip --test "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
-          test "$(gzip --decompress --stdout \
-            "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" \
-            | dd bs=6 count=1 2>/dev/null)" = "070701"
-          rm "lighthouse-initramfs-${KERNEL_VERSION}-arm64.cpio"
-
-      - name: Download and verify Linux source
-        run: |
-          set -eu
-          major="${KERNEL_VERSION%%.*}"
-          base="https://cdn.kernel.org/pub/linux/kernel/v${major}.x"
-          download_resumable() {
-            url="$1"
-            output="$2"
-            attempt=1
-            while :; do
-              if curl --http1.1 --fail --location --continue-at - \
-                --connect-timeout 30 --speed-time 60 --speed-limit 1024 \
-                --retry 3 --retry-delay 5 --retry-max-time 120 \
-                --retry-all-errors "$url" --output "$output"; then
-                return 0
-              fi
-              if [ "$attempt" -ge 12 ]; then
-                echo "download failed after $attempt resumable attempts: $url" >&2
-                return 1
-              fi
-              echo "download interrupted; resuming in 5 seconds (attempt $attempt/12)" >&2
-              attempt=$((attempt + 1))
-              sleep 5
-            done
-          }
-          download_resumable \
-            "${base}/linux-${KERNEL_VERSION}.tar.xz" \
-            "linux-${KERNEL_VERSION}.tar.xz"
-          curl --http1.1 --fail --location --retry 8 --retry-delay 5 \
-            --retry-max-time 300 --retry-all-errors \
-            "${base}/sha256sums.asc" --output sha256sums.asc
-          grep " linux-${KERNEL_VERSION}.tar.xz$" sha256sums.asc \
-            | sha256sum --check --strict -
-          tar --extract --file "linux-${KERNEL_VERSION}.tar.xz"
-
-      - name: Merge Kata ARM64 and LightHouse configuration
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          kernel_tree="linux-${KERNEL_VERSION}"
-          fragments="$PWD/kata-config-fragments"
-          mkdir -p "$fragments/common" "$fragments/arm64"
-
-          download_scope() {
-            scope="$1"
-            api="repos/kata-containers/kata-containers/contents/tools/packaging/kernel/configs/fragments/${scope}?ref=${KATA_CONFIG_REF}"
-            while IFS=$'\t' read -r name download_url; do
-              curl --http1.1 --fail --location --retry 8 --retry-delay 2 \
-                --retry-all-errors "$download_url" \
-                --output "$fragments/$scope/$name"
-            done < <(gh api "$api" --jq '.[] | select(.type == "file" and (.name | endswith(".conf"))) | [.name, .download_url] | @tsv')
-          }
-
-          download_scope common
-          download_scope arm64
-          mapfile -t common_configs < <(grep -L '!arm64' "$fragments"/common/*.conf | sort)
-          mapfile -t arm64_configs < <(find "$fragments/arm64" -maxdepth 1 -name '*.conf' -print | sort)
-          test "${#common_configs[@]}" -gt 0
-          test "${#arm64_configs[@]}" -gt 0
-          (
-            cd "$kernel_tree"
-            scripts/kconfig/merge_config.sh -m \
-              "${common_configs[@]}" "${arm64_configs[@]}" "$GITHUB_WORKSPACE/config-aarch64"
-          )
-
-      - name: Resolve Kconfig dependencies
-        run: |
-          set -eu
-          cd "linux-${KERNEL_VERSION}"
-          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
-          # This is the complete Linux hardware contract that LightHouse can
-          # currently ask Virtualization.framework to expose: direct boot,
-          # PCI/virtio-mmio, block/NVMe, network, console, entropy, vsock,
-          # balloon, input, sound, graphics, virtio-fs, and the XHCI-backed USB
-          # classes accepted by the product's USB picker.
-          # Check the resolved .config rather than trusting the input fragment:
-          # olddefconfig may otherwise silently drop a leaf whose dependency
-          # changed in a newer LTS kernel.
-          for setting in \
-            CONFIG_ARM64_16K_PAGES=y \
-            CONFIG_MODULES=y \
-            CONFIG_MODULE_UNLOAD=y \
-            CONFIG_MODVERSIONS=y \
-            CONFIG_MODULE_SRCVERSION_ALL=y \
-            CONFIG_TCP_CONG_BIC=y \
-            CONFIG_TCP_CONG_WESTWOOD=y \
-            CONFIG_TCP_CONG_HTCP=y \
-            CONFIG_BLK_DEV_INITRD=y \
-            CONFIG_RD_GZIP=y \
-            CONFIG_EFI=y \
-            CONFIG_EFI_STUB=y \
-            CONFIG_OF=y \
-            CONFIG_ARM_PSCI_FW=y \
-            CONFIG_ARM_ARCH_TIMER=y \
-            CONFIG_ARM_GIC=y \
-            CONFIG_ARM_GIC_V3=y \
-            CONFIG_GPIO_PL061=y \
-            CONFIG_RTC_DRV_PL031=y \
-            CONFIG_MEMORY_HOTPLUG=y \
-            CONFIG_MEMORY_HOTREMOVE=y \
-            CONFIG_KVM=y \
-            CONFIG_CGROUPS=y \
-            CONFIG_MEMCG=y \
-            CONFIG_NAMESPACES=y \
-            CONFIG_SECCOMP=y \
-            CONFIG_SECCOMP_FILTER=y \
-            CONFIG_PREEMPT_DYNAMIC=y \
-            CONFIG_PSI=y \
-            CONFIG_LRU_GEN=y \
-            CONFIG_SECURITY_LANDLOCK=y \
-            CONFIG_SECURITY_SELINUX=y \
-            CONFIG_PCI=y \
-            CONFIG_PCI_ECAM=y \
-            CONFIG_PCI_HOST_COMMON=y \
-            CONFIG_PCI_HOST_GENERIC=y \
-            CONFIG_VIRTIO=y \
-            CONFIG_VIRTIO_PCI_LIB=y \
-            CONFIG_VIRTIO_PCI=y \
-            CONFIG_VIRTIO_MMIO=y \
-            CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y \
-            CONFIG_VIRTIO_BLK=y \
-            CONFIG_NVME_CORE=y \
-            CONFIG_BLK_DEV_NVME=y \
-            CONFIG_NVME_HWMON=y \
-            CONFIG_VIRTIO_NET=y \
-            CONFIG_VIRTIO_CONSOLE=y \
-            CONFIG_HW_RANDOM_VIRTIO=y \
-            CONFIG_HW_RANDOM_ARM_SMCCC_TRNG=y \
-            CONFIG_VSOCKETS=y \
-            CONFIG_VIRTIO_VSOCKETS=y \
-            CONFIG_VIRTIO_VSOCKETS_COMMON=y \
-            CONFIG_VIRTIO_BALLOON=y \
-            CONFIG_VIRTIO_INPUT=y \
-            CONFIG_INPUT=y \
-            CONFIG_INPUT_EVDEV=y \
-            CONFIG_SOUND=y \
-            CONFIG_SND=y \
-            CONFIG_SND_TIMER=y \
-            CONFIG_SND_PCM=y \
-            CONFIG_SND_VIRTIO=y \
-            CONFIG_CRYPTO_HW=y \
-            CONFIG_CRYPTO_DEV_VIRTIO=y \
-            CONFIG_DMA_SHARED_BUFFER=y \
-            CONFIG_VIRTIO_DMA_SHARED_BUFFER=y \
-            CONFIG_DRM=y \
-            CONFIG_DRM_KMS_HELPER=y \
-            CONFIG_DRM_GEM_SHMEM_HELPER=y \
-            CONFIG_DRM_VIRTIO_GPU=y \
-            CONFIG_DRM_VIRTIO_GPU_KMS=y \
-            CONFIG_FUSE_FS=y \
-            CONFIG_VIRTIO_FS=y \
-            CONFIG_USB_SUPPORT=y \
-            CONFIG_USB_COMMON=y \
-            CONFIG_USB=y \
-            CONFIG_USB_XHCI_HCD=y \
-            CONFIG_USB_XHCI_PCI=y \
-            CONFIG_HID_SUPPORT=y \
-            CONFIG_HID=y \
-            CONFIG_USB_HID=y \
-            CONFIG_HID_GENERIC=y \
-            CONFIG_HIDRAW=y \
-            CONFIG_USB_STORAGE=y \
-            CONFIG_USB_UAS=y \
-            CONFIG_USB_ACM=y \
-            CONFIG_USB_PRINTER=y \
-            CONFIG_USB_SERIAL=y \
-            CONFIG_USB_SERIAL_GENERIC=y \
-            CONFIG_USB_SERIAL_CP210X=y \
-            CONFIG_USB_SERIAL_FTDI_SIO=y \
-            CONFIG_USB_SERIAL_PL2303=y \
-            CONFIG_USB_USBNET=y \
-            CONFIG_USB_NET_AX88179_178A=y \
-            CONFIG_USB_NET_CDCETHER=y \
-            CONFIG_USB_NET_CDC_NCM=y \
-            CONFIG_USB_NET_RNDIS_HOST=y \
-            CONFIG_USB_LAN78XX=y \
-            CONFIG_USB_NET_SMSC95XX=y \
-            CONFIG_USB_RTL8152=y \
-            CONFIG_USB_RTL8153_ECM=y \
-            CONFIG_GPIOLIB=y \
-            CONFIG_HWMON=y \
-            CONFIG_THERMAL_HWMON=y \
-            CONFIG_THERMAL_OF=y \
-            CONFIG_RTC_NVMEM=y \
-            CONFIG_NVMEM=y \
-            CONFIG_DMADEVICES=y \
-            CONFIG_SCSI_MOD=y \
-            CONFIG_SCSI_COMMON=y \
-            CONFIG_SCSI=y \
-            CONFIG_BLK_DEV_SD=y \
-            CONFIG_BLK_DEV_SR=y \
-            CONFIG_CHR_DEV_SG=y \
-            CONFIG_EXT4_FS=y \
-            CONFIG_BTRFS_FS=y \
-            CONFIG_XFS_FS=y \
-            CONFIG_F2FS_FS=y \
-            CONFIG_NTFS3_FS=y \
-            CONFIG_EXFAT_FS=y \
-            CONFIG_MSDOS_FS=y \
-            CONFIG_VFAT_FS=y \
-            CONFIG_ISO9660_FS=y \
-            CONFIG_UDF_FS=y \
-            CONFIG_EROFS_FS=y \
-            CONFIG_SQUASHFS=y \
-            CONFIG_NFS_FS=y \
-            CONFIG_CIFS=y \
-            CONFIG_9P_FS=y \
-            CONFIG_AUTOFS_FS=y \
-            CONFIG_FUSE_FS=y \
-            CONFIG_OVERLAY_FS=y \
-            CONFIG_OVERLAY_FS_INDEX=y \
-            CONFIG_OVERLAY_FS_XINO_AUTO=y \
-            CONFIG_TMPFS_POSIX_ACL=y \
-            CONFIG_DM_MULTIPATH=y \
-            CONFIG_DM_MULTIPATH_QL=y \
-            CONFIG_DM_MULTIPATH_ST=y \
-            CONFIG_ENCRYPTED_KEYS=y \
-            CONFIG_IMA=y \
-            CONFIG_EVM=y \
-            CONFIG_EVM_ATTR_FSUUID=y \
-            CONFIG_NET_NS=y \
-            CONFIG_VETH=y \
-            CONFIG_TUN=y \
-            CONFIG_TAP=y \
-            CONFIG_BRIDGE=y \
-            CONFIG_VLAN_8021Q=y \
-            CONFIG_MACVLAN=y \
-            CONFIG_MACVTAP=y \
-            CONFIG_IPVLAN=y \
-            CONFIG_VXLAN=y \
-            CONFIG_GENEVE=y \
-            CONFIG_NET_VRF=y \
-            CONFIG_NF_TABLES=y \
-            CONFIG_IP_VS=y \
-            CONFIG_NET_SCH_FQ_CODEL=y \
-            CONFIG_NET_CLS_FLOWER=y \
-            CONFIG_WIREGUARD=y; do
-            grep -Fxq "$setting" .config || {
-              echo "Required LightHouse setting missing: $setting" >&2
-              exit 1
-            }
-          done
-          grep -Fxq '# CONFIG_ARM64_4K_PAGES is not set' .config
-          grep -Fxq '# CONFIG_MODULE_SIG is not set' .config
-          grep -Fxq '# CONFIG_TRIM_UNUSED_KSYMS is not set' .config
-          grep -Fxq 'CONFIG_LSM="landlock,yama,integrity,apparmor,selinux"' .config
-          # These classes are excluded by current LightHouse product policy,
-          # not because Virtualization.framework can never expose them.
-          for setting in \
-            '# CONFIG_MEDIA_SUPPORT is not set'; do
-            grep -Fxq "$setting" .config || {
-              echo "An intentionally unsupported product device class was enabled: $setting" >&2
-              exit 1
-            }
-          done
-          # Keep only classes for which VZ has no transport and USB pass-through
-          # cannot make the underlying platform bus visible to the guest.
-          for setting in \
-            '# CONFIG_MMC is not set' \
-            '# CONFIG_MTD is not set' \
-            '# CONFIG_ATA is not set' \
-            '# CONFIG_IOMMU_SUPPORT is not set' \
-            '# CONFIG_PINCTRL is not set' \
-            '# CONFIG_SPI is not set' \
-            '# CONFIG_ACPI_I2C_OPREGION is not set' \
-            '# CONFIG_ACPI_PRMT is not set' \
-            '# CONFIG_PMIC_OPREGION is not set' \
-            '# CONFIG_DEVMEM is not set' \
-            '# CONFIG_UEVENT_HELPER is not set' \
-            '# CONFIG_WATCHDOG is not set' \
-            '# CONFIG_REGULATOR is not set' \
-            '# CONFIG_IIO is not set'; do
-            grep -Fxq "$setting" .config || {
-              echo "A VZ-unreachable device class was enabled: $setting" >&2
-              exit 1
-            }
-          done
-          if grep -E '^CONFIG_[A-Za-z0-9_]+=m$' .config; then
-            echo 'LightHouse boot and supported-device features must remain built in.' >&2
-            exit 1
-          fi
-          # The guest only sees VZ/NativePipe virtio devices plus explicitly
-          # supported USB pass-through classes. Generic PCI and virtio-mmio are
-          # VZ transport buses, not physical-device drivers.
-          if grep -E '^CONFIG_(SCSI_(HPSA|HISI_SAS|SMARTPQI|VIRTIO)|ATA|SATA_[A-Za-z0-9_]+|PATA_[A-Za-z0-9_]+)=y$' .config; then
-            echo 'A VZ-absent SCSI/SATA driver is enabled.' >&2
-            exit 1
-          fi
-          if grep -E '^CONFIG_(ARCH_(EXYNOS|HISI|QCOM|SEATTLE|SYNQUACER|THUNDER|THUNDER2|VEXPRESS)|VIRTIO_(MEM|PCI_LEGACY|PMEM)|NET_9P_VIRTIO|CRYPTO_DEV_(CAVIUM_ZIP|QCE[A-Za-z0-9_]*|QCOM_RNG|HISI_SEC[A-Za-z0-9_]*)|SERIAL_(8250[A-Za-z0-9_]*|AMBA_PL011[A-Za-z0-9_]*|SAMSUNG[A-Za-z0-9_]*)|HW_RANDOM_(HISI|HISTB|CAVIUM|EXYNOS|CN10K|TPM)|RTC_DRV_(DS3232[A-Za-z0-9_]*|S3C)|PTP_1588_CLOCK_(KVM|VMCLOCK)|PCI_(STUB|ATS|IOV|PRI|PASID)|VFIO[A-Za-z0-9_]*|VDPA[A-Za-z0-9_]*|VHOST[A-Za-z0-9_]*|IOMMU_SUPPORT|LIBNVDIMM|NVDIMM[A-Za-z0-9_]*|NET_VENDOR_[A-Za-z0-9_]+)=y$' .config; then
-            echo 'A device outside the VZ/NativePipe/USB hardware contract is enabled.' >&2
-            exit 1
-          fi
-          printf 'Resolved config: %s built-ins; external modules enabled; 0 in-tree modular features\n' \
-            "$(grep -Ec '^CONFIG_[A-Za-z0-9_]+=y$' .config)"
-
-      - name: Build kernel
-        run: |
-          cd "linux-${KERNEL_VERSION}"
-          make -j"$(nproc)" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
-            Image modules
-
-      - name: Verify external module ABI
-        run: |
-          set -eu
-          module_dir="$PWD/module-smoke"
-          mkdir -p "$module_dir"
-          printf '%s\n' 'obj-m := lighthouse_module_smoke.o' > "$module_dir/Makefile"
-          printf '%s\n' \
-            '#include <linux/init.h>' \
-            '#include <linux/module.h>' \
-            'static int __init lighthouse_module_smoke_init(void) { return 0; }' \
-            'static void __exit lighthouse_module_smoke_exit(void) {}' \
-            'module_init(lighthouse_module_smoke_init);' \
-            'module_exit(lighthouse_module_smoke_exit);' \
-            'MODULE_DESCRIPTION("LightHouse external module ABI smoke test");' \
-            'MODULE_LICENSE("GPL");' \
-            > "$module_dir/lighthouse_module_smoke.c"
-          make -C "linux-${KERNEL_VERSION}" \
-            ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
-            M="$module_dir" modules
-          test -s "$module_dir/lighthouse_module_smoke.ko"
-          "$CROSS_COMPILE"readelf -h "$module_dir/lighthouse_module_smoke.ko" \
-            | grep -q 'Machine:.*AArch64'
-
-      - name: Package kernel and metadata
-        run: |
-          set -eu
-          python3 adapters/validate.py
-          for adapter in adapters/*.sh; do sh -n "$adapter"; done
-          sh adapters/udhcpc.sh --self-test
-          mkdir -p release
-          cp "linux-${KERNEL_VERSION}/arch/arm64/boot/Image" \
-            "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image"
-          test "$(dd if="release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" \
-            bs=1 skip=56 count=4 2>/dev/null)" = "ARMd"
-          cp "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" release/
-          cp "linux-${KERNEL_VERSION}/.config" release/config-aarch64
-          cp "linux-${KERNEL_VERSION}/System.map" release/System.map
-          cp "linux-${KERNEL_VERSION}/Module.symvers" release/Module.symvers
-          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
-            --owner=0 --group=0 --numeric-owner --format=gnu \
-            --create --file=- -C release . \
-            | gzip --no-name --best \
-            > "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz"
-          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
-            --owner=0 --group=0 --numeric-owner --format=gnu \
-            --create --file=- -C adapters . \
-            | gzip --no-name --best \
-            > "release/lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz"
-          mkdir -p artifact
-          cp "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" artifact/
-          cp "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" artifact/
-          cp "release/lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" artifact/
-          cp "release/lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz" artifact/
-          cp release/config-aarch64 release/System.map release/Module.symvers artifact/
-          (cd artifact && sha256sum \
-            "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" \
-            "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" \
-            "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" \
-            "lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz" \
-            config-aarch64 System.map Module.symvers > SHA256SUMS)
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: lighthouse-linux-arm64-16k
-          path: artifact/*
-          if-no-files-found: error
-          retention-days: 14
+  initramfs:
+    needs: prepare
+    uses: ./.github/workflows/build-initramfs.yml
 
   release:
     name: Publish verified prerelease
-    needs: build
+    needs: [prepare, kernel, initramfs]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     env:
-      KERNEL_VERSION: ${{ needs.build.outputs.kernel_version }}
-      RELEASE_REVISION: ${{ needs.build.outputs.release_revision }}
+      KERNEL_VERSION: ${{ needs.prepare.outputs.kernel_version }}
+      RELEASE_REVISION: ${{ needs.prepare.outputs.revision }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - name: Download build artifact
+      - name: Check out configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download independent outputs
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: lighthouse-linux-arm64-16k
+          pattern: lighthouse-*-arm64
+          merge-multiple: true
           path: release
 
-      - name: Verify downloaded artifact
-        run: |
-          set -eu
-          cd release
-          sha256sum --check --strict SHA256SUMS
-          test -f "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz"
-          test -f "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image"
-          test -f "lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
-          test -f "lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz"
-          test -f config-aarch64
-          test -f Module.symvers
-          test -f System.map
-
-      - name: Publish immutable prerelease candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+      - name: Package release
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          tagged_sha="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha)"
-          if [ "$tagged_sha" != "$GITHUB_SHA" ]; then
-            echo "Tag $tag moved from built commit $GITHUB_SHA to $tagged_sha." >&2
+          test "$(dd if="release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" \
+            bs=1 skip=56 count=4 2>/dev/null)" = ARMd
+          gzip --test "release/lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
+          for file in config-aarch64 System.map Module.symvers; do
+            test -s "release/$file"
+          done
+          python3 adapters/validate.py
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          tar --sort=name --mtime="@$source_date_epoch" \
+            --owner=0 --group=0 --numeric-owner --format=gnu \
+            --create --file=- -C release . | gzip --no-name --best \
+            > "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz"
+          mv "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" release/
+          tar --sort=name --mtime="@$source_date_epoch" \
+            --owner=0 --group=0 --numeric-owner --format=gnu \
+            --create --file=- -C adapters . | gzip --no-name --best \
+            > "release/lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz"
+          (cd release && sha256sum * > SHA256SUMS)
+          (cd release && sha256sum --check --strict SHA256SUMS)
+
+      - name: Publish immutable prerelease
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to replace it." >&2
             exit 1
           fi
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release or draft $tag already exists; refusing to replace its assets." >&2
+          if tagged_sha="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null)"; then
+            test "$tagged_sha" = "$GITHUB_SHA"
+          elif [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            echo "Release tag $RELEASE_TAG is missing." >&2
             exit 1
           fi
-          gh release create "$tag" \
-            --verify-tag \
-            --draft \
-            --generate-notes \
+          gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
+            --draft --generate-notes \
             --title "LightHouse Kernel ${KERNEL_VERSION}-${RELEASE_REVISION}" \
-            "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" \
-            "release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" \
-            "release/lighthouse-initramfs-${KERNEL_VERSION}-arm64.img" \
-            "release/lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz" \
-            release/config-aarch64 \
-            release/System.map \
-            release/Module.symvers \
-            release/SHA256SUMS
-          gh release edit "$tag" --draft=false --prerelease
+            release/*
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease
