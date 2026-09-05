@@ -12,10 +12,22 @@ fail()
 	exit 1
 }
 
+unmount_target()
+(
+	# Daemon shutdown may return before the kernel releases its last file
+	# references. Wait for actual unmount, never detach a still-busy mount.
+	remaining=100
+	while ! umount "$1" 2>/dev/null; do
+		remaining=$((remaining - 1))
+		[ "$remaining" -gt 0 ] || { umount "$1"; return $?; }
+		sleep 0.01
+	done
+)
+
 cleanup_target_root()
 {
 	[ "${NP_TARGET_ROOT:-/}" = / ] ||
-		! mountpoint -q "$NP_TARGET_ROOT" || umount "$NP_TARGET_ROOT" || true
+		! mountpoint -q "$NP_TARGET_ROOT" || unmount_target "$NP_TARGET_ROOT" || true
 }
 
 trap cleanup_target_root EXIT HUP INT TERM
@@ -47,12 +59,12 @@ mount_target_runtime()
 	mkdir -p "$root/dev" "$root/proc" "$root/sys" "$root/run" "$root/etc"
 	mount -o bind /dev "$root/dev" || return 1
 	if ! mount -o bind /proc "$root/proc"; then
-		umount "$root/dev"
+		unmount_target "$root/dev"
 		return 1
 	fi
 	if ! mount -o bind /sys "$root/sys"; then
-		umount "$root/proc"
-		umount "$root/dev"
+		unmount_target "$root/proc"
+		unmount_target "$root/dev"
 		return 1
 	fi
 	if ! rm -f "$root/etc/resolv.conf" ||
@@ -65,9 +77,9 @@ mount_target_runtime()
 unmount_target_runtime()
 {
 	root=$1 np_unmount_result=0
-	umount "$root/sys" || np_unmount_result=1
-	umount "$root/proc" || np_unmount_result=1
-	umount "$root/dev" || np_unmount_result=1
+	unmount_target "$root/sys" || np_unmount_result=1
+	unmount_target "$root/proc" || np_unmount_result=1
+	unmount_target "$root/dev" || np_unmount_result=1
 	return "$np_unmount_result"
 }
 

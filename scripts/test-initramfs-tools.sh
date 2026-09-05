@@ -46,6 +46,15 @@ NP_SOURCE_PATH=/nonexistent/source NP_TARGET_ROOT=/ \
 		. "$1"
 		[ "$(partition_path /dev/vda)" = /dev/vda1 ]
 		[ "$(partition_path /dev/nbd0)" = /dev/nbd0p1 ]
+		sleep() { :; }
+		attempts=0
+		umount() { attempts=$((attempts + 1)); [ "$attempts" -ge 3 ]; }
+		unmount_target /unused
+		umount() { return 1; }
+		if unmount_target /unused; then
+			echo "a permanently busy mount must fail" >&2
+			exit 1
+		fi
 	' sh "$repo/adapters/common.sh"
 
 for tool in blkid sfdisk; do
