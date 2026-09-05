@@ -1518,24 +1518,32 @@ static const char *gsettings_program(void) {
 /* Apply to a live desktop when one exists. The persisted preference remains
  * authoritative when gsettings or the user bus is absent; nativepipe-session
  * retries it when the next graphical session starts. */
-static void apply_desktop_preferences_to_session(uint8_t color_scheme) {
+static int apply_desktop_preferences_to_session(uint8_t color_scheme) {
     const char *program = gsettings_program();
     char user[64];
-    if (!program || read_cached_session_user(user, sizeof(user)) < 0)
-        return;
+    if (read_cached_session_user(user, sizeof(user)) < 0)
+        return 0;
     struct passwd *pw = getpwnam(user);
     struct session_environment env;
     if (!pw || pw->pw_uid == 0 || read_session_environment(pw->pw_uid, &env) < 0 ||
         !env.dbus[0])
-        return;
+        return 0;
+    if (!program) {
+        errno = ENOENT;
+        return -1;
+    }
 
     pid_t pid = fork();
     if (pid != 0) {
         if (pid > 0) {
-            int status;
-            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+            int status = 0;
+            pid_t waited;
+            do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+            if (waited > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0)
+                return 0;
+            errno = EIO;
         }
-        return;
+        return -1;
     }
 
     char runtime[96];
@@ -1551,7 +1559,14 @@ static void apply_desktop_preferences_to_session(uint8_t color_scheme) {
     const char *value = color_scheme == 2 ? "prefer-dark" : "prefer-light";
     char *argv[] = {(char *)program, "set", "org.gnome.desktop.interface",
                     "color-scheme", (char *)value, NULL};
-    execv(program, argv);
+    if (np_run(argv) != 0)
+        _exit(1);
+    /* The standard color-scheme preference serves libadwaita/Qt. Plain GTK
+     * also needs its theme setting; changing only color-scheme leaves it on
+     * the light Adwaita theme even though the portal already reports dark. */
+    char *theme[] = {(char *)program, "set", "org.gnome.desktop.interface",
+                     "gtk-theme", color_scheme == 2 ? "Adwaita-dark" : "Adwaita", NULL};
+    execv(program, theme);
     _exit(127);
 }
 
@@ -2802,7 +2817,9 @@ static int handle_desktop_preferences(int fd, const uint8_t *payload, size_t n) 
     if (np_write_file(NP_DESKTOP_PREFERENCES_FILE, text, strlen(text), 0644) < 0)
         return send_bin_error(fd, id, (uint32_t)(errno ? errno : EIO),
                               "cannot persist desktop preferences");
-    apply_desktop_preferences_to_session(color_scheme);
+    if (apply_desktop_preferences_to_session(color_scheme) < 0)
+        return send_bin_error(fd, id, (uint32_t)(errno ? errno : EIO),
+                              "cannot apply desktop preferences to the running session");
     return send_ok(fd, id);
 }
 
