@@ -17,7 +17,7 @@ for adapter in "$repo"/adapters/*.sh; do
 done
 
 # These are used by the partition-device wait loops and the DHCP hook.
-run_busybox sh -ec '[ "$((2147483647 + 1))" = 2147483648; sleep 0.01'
+run_busybox sh -ec 'test "$((2147483647 + 1))" = 2147483648; sleep 0.01'
 run_busybox sleep 0.01
 run_busybox sh "$repo/adapters/udhcpc.sh" --self-test
 
