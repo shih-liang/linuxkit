@@ -90,11 +90,15 @@ jobs:
 
       - name: Install kernel build dependencies
         run: |
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             bc bison build-essential bzip2 cpio flex gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
+            libncurses-dev:arm64 \
             libelf-dev libssl-dev pahole python3 rsync xz-utils
+          test -f /usr/lib/aarch64-linux-gnu/libncursesw.a
+          test -f /usr/lib/aarch64-linux-gnu/libtinfo.a
 
       - name: Build static BusyBox
         run: |

@@ -2,7 +2,6 @@ name: Build LinuxKit guest binaries
 
 on:
   push:
-    branches: [main]
     tags: ["linuxkit-guest-v*"]
   workflow_dispatch:
 
