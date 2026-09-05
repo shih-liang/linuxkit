@@ -109,7 +109,7 @@ jobs:
             bc bison build-essential bzip2 cpio flex gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             libncurses-dev:arm64 \
-            libelf-dev libssl-dev pahole python3 rsync xz-utils
+            libelf-dev libssl-dev pahole python3 qemu-user rsync xz-utils
           test -f /usr/lib/aarch64-linux-gnu/libncursesw.a
           test -f /usr/lib/aarch64-linux-gnu/libtinfo.a
 
@@ -129,6 +129,10 @@ jobs:
           busybox_config="busybox-${BUSYBOX_VERSION}/.config"
           grep -q '^CONFIG_STATIC=y$' "$busybox_config"
           grep -q '^CONFIG_ASH=y$' "$busybox_config"
+          grep -q '^CONFIG_FEATURE_SH_MATH=y$' "$busybox_config"
+          grep -q '^CONFIG_FEATURE_SH_MATH_64=y$' "$busybox_config"
+          grep -q '^CONFIG_FLOAT_DURATION=y$' "$busybox_config"
+          grep -q '^CONFIG_FEATURE_FANCY_SLEEP=y$' "$busybox_config"
           grep -q '^CONFIG_MOUNT=y$' "$busybox_config"
           grep -q '^CONFIG_SWITCH_ROOT=y$' "$busybox_config"
           grep -q '^CONFIG_UDHCPC=y$' "$busybox_config"
@@ -275,6 +279,7 @@ jobs:
           mkdir -p initramfs-root/dev initramfs-root/proc initramfs-root/sys \
             initramfs-root/run initramfs-root/newroot initramfs-root/tmp
           chmod 1777 initramfs-root/tmp
+          sh scripts/test-initramfs-tools.sh "$PWD/initramfs-root"
           find initramfs-root -exec touch -h --date="@$SOURCE_DATE_EPOCH" {} +
           (
             cd initramfs-root
