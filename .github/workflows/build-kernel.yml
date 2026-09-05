@@ -90,7 +90,20 @@ jobs:
 
       - name: Install kernel build dependencies
         run: |
+          # GitHub's amd64 runner mirrors do not carry arm64 packages.  Keep
+          # them amd64-only and obtain target development archives from
+          # Ubuntu's official ports repository.
           sudo dpkg --add-architecture arm64
+          sudo sed -i '/^URIs: /a Architectures: amd64' \
+            /etc/apt/sources.list.d/ubuntu.sources
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: http://ports.ubuntu.com/ubuntu-ports' \
+            'Suites: noble noble-updates noble-security' \
+            'Components: main universe' \
+            'Architectures: arm64' \
+            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+            | sudo tee /etc/apt/sources.list.d/ubuntu-ports-arm64.sources >/dev/null
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             bc bison build-essential bzip2 cpio flex gcc-aarch64-linux-gnu \
