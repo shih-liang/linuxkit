@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-. /run/nativepipe/payload/common.sh
+. "${NP_SOURCE_PATH%/*}/common.sh"
 
 case ${1:-} in
 install)
@@ -14,7 +14,8 @@ install)
 		pacman-key --init
 		pacman-key --populate archlinuxarm
 		pacman -Syu --noconfirm --needed \
-			systemd iproute2 util-linux kmod shadow sudo ca-certificates \
+			systemd iproute2 util-linux kmod shadow sudo ca-certificates dbus \
+			xdg-user-dirs gsettings-desktop-schemas ttf-dejavu adwaita-icon-theme \
 			pipewire pipewire-audio pipewire-pulse wireplumber \
 			mesa vulkan-virtio wayland libxkbcommon libxcb xcb-util-cursor \
 			vulkan-icd-loader xorg-xwayland xwayland-satellite
@@ -22,10 +23,10 @@ install)
 	finish_rootfs
 	;;
 software)
-	enable_rosetta
-	packages="ca-certificates dbus sudo xdg-user-dirs"
-	selected developer-tools && packages="$packages base-devel curl git"
-	pacman -Syu --noconfirm --needed $packages
+	if selected developer-tools; then
+		trap 'gpgconf --homedir /etc/pacman.d/gnupg --kill all' EXIT
+		pacman -S --noconfirm --needed base-devel curl git
+	fi
 	;;
 repair)
 	grow_root_disk

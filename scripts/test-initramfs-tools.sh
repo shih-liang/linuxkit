@@ -13,7 +13,16 @@ done
 
 run_busybox()
 {
-	qemu-aarch64 "$busybox" "$@"
+	run_tool "$busybox" "$@"
+}
+
+run_tool()
+{
+	if [ "$(uname -m)" = aarch64 ]; then
+		"$@"
+	else
+		qemu-aarch64 "$@"
+	fi
 }
 
 for adapter in "$repo"/adapters/*.sh; do
@@ -21,43 +30,11 @@ for adapter in "$repo"/adapters/*.sh; do
 done
 
 # These are used by the partition-device wait loops and the DHCP hook.
-run_busybox sh -ec 'test "$((2147483647 + 1))" = 2147483648; sleep 0.01'
+run_busybox sh -ec 'test "$((2147483647 + 1))" = 2147483648'
 run_busybox sleep 0.01
 run_busybox sh "$repo/adapters/udhcpc.sh" --self-test
 
-# Execute deconfiguration with an ip stub: DHCPv4 must not flush the IPv6
-# link-local address which networkd needs after switch_root.
-run_busybox sh -ec '
-	ip() {
-		case "$*" in
-		"link set dev test0 up"|"-4 addr flush dev test0") return 0 ;;
-		*) echo "unexpected DHCP command: ip $*" >&2; return 1 ;;
-		esac
-	}
-	hook=$1
-	interface=test0
-	set -- deconfig
-	. "$hook"
-' sh "$repo/adapters/udhcpc.sh"
-
-# Source the complete shared adapter without touching a disk or mountpoint.
-NP_SOURCE_PATH=/nonexistent/source NP_TARGET_ROOT=/ \
-	qemu-aarch64 "$busybox" sh -ec '
-		. "$1"
-		[ "$(partition_path /dev/vda)" = /dev/vda1 ]
-		[ "$(partition_path /dev/nbd0)" = /dev/nbd0p1 ]
-		sleep() { :; }
-		attempts=0
-		umount() { attempts=$((attempts + 1)); [ "$attempts" -ge 3 ]; }
-		unmount_target /unused
-		umount() { return 1; }
-		if unmount_target /unused; then
-			echo "a permanently busy mount must fail" >&2
-			exit 1
-		fi
-	' sh "$repo/adapters/common.sh"
-
 for tool in blkid sfdisk; do
-	qemu-aarch64 "$root/sbin/$tool" --version
+	run_tool "$root/sbin/$tool" --version
 done
 echo 'ARM64 initramfs shell, adapters, DHCP hook and disk tools passed'

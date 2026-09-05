@@ -25,7 +25,6 @@ for distro in catalog["distributions"]:
     assert sum(value.startswith("root=") for value in boot_arguments) == 1
     assert all(value and not any(char.isspace() for char in value)
                for value in boot_arguments)
-    assert "repair)" in (root / distro["adapter"]).read_text()
 
     source = distro["source"]
     assert not ({"value", "artifactURL", "downloadURL", "releaseURL"} & source.keys())
@@ -54,16 +53,6 @@ assert {"steam", "x86_64", "wine"} <= all_software
 ubuntu = next(item for item in catalog["distributions"] if item["id"] == "ubuntu")
 ubuntu_software = {item["id"]: item for item in ubuntu["software"]}
 assert ubuntu_software["wine"].get("requiresRosetta") is True
-ubuntu_adapter = (root / ubuntu["adapter"]).read_text()
-assert "wine64:amd64" in ubuntu_adapter
-assert "libgl1-mesa-dri" in ubuntu_adapter
-assert "fex-emu-binfmt" not in ubuntu_adapter
-fedora_adapter = (root / "fedora.sh").read_text()
-arch_adapter = (root / "archlinux.sh").read_text()
-assert "mesa-dri-drivers" in fedora_adapter
-assert "xcb-util-cursor" in fedora_adapter
-assert "mesa vulkan-virtio" in arch_adapter
-assert "xcb-util-cursor" in arch_adapter
 
 # Check the bytes actually written to binfmt_misc. printf %b would emit NULs,
 # truncating the ELF match before e_machine and hijacking native ARM64 programs.

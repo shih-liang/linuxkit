@@ -21,3 +21,15 @@ Guest GUI dependencies come from the selected distribution. Fedora and Arch
 install both Xwayland and `xwayland-satellite`; Ubuntu installs Xwayland and
 enables satellite only when that package appears in its configured archive.
 Neither linuxkit nor NativePipe carries a private satellite executable.
+
+All package installation, including optional software, completes inside the
+installer's chroot before handing off to the real init. The payload is available
+as a read-only bind mount during those commands and is not a boot-time
+dependency. A failed package transaction returns to recovery rather than
+preventing the installed guestd from starting. No first-boot software service
+or completion marker is installed.
+
+The baseline includes user-session D-Bus/PAM integration, desktop settings
+schemas, fonts and icons even when no optional software is selected. Fedora
+uses the distribution's `libwayland-client` and `libwayland-server` packages;
+there is no `wayland-libs` package.

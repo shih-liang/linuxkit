@@ -12,6 +12,11 @@ selects recovery. `PARTLABEL=` is supported as well, and a comma-separated
 `rootfstype=` list retains the kernel's normal fallback behavior. It never
 guesses a disk and never enters a shell automatically.
 
+`rootwait` waits only for a block device to appear. Once that device exists,
+a filesystem mount failure enters recovery rather than retrying forever.
+Initialization failures also retain PID 1 and the recovery channel instead of
+exiting and causing a kernel panic.
+
 For direct LightHouse boots, the host also supplies
 `nativepipe.memory_target_bytes=<bytes>`. PID 1 validates the decimal value and
 writes it to `/run/nativepipe/target-memory-bytes`; `/run` is then moved into
@@ -41,7 +46,8 @@ mount moves are rolled back before recovery resumes.
 
 Paths presented to the host are ordinary absolute guest paths. During early
 boot they are resolved beneath `/newroot` with `openat2`, so a path cannot
-escape the explicitly mounted target. Write permission follows the mounted
+escape the explicitly mounted target. Absolute symlinks resolve inside that
+root, just as they do after `switch_root`. Write permission follows the mounted
 filesystem itself; PID 1 adds no separate write policy.
 
 Installer and repair adapters are data rather than compiled branches. The host
@@ -60,12 +66,21 @@ installation. Ubuntu Base and Fedora Container Base are root filesystems, not
 bootable disk images, so their adapters use that network to install the
 distribution-specific systemd, device-manager and account baseline inside the
 new root before handoff. Target runtime mounts are always unwound, and an
-interrupted install can safely rewrite the installer-owned disk on retry.
+interrupted install can rewrite the installer-owned disk on retry only after
+all its mounts have been released. A busy mount is an error, not permission to
+continue formatting.
+
+Disk growth preserves the existing partition start, identity and contents:
+`sfdisk -N 1` receives `size=+`, then `e2fsck` and `resize2fs` grow ext4.
+An empty size field would retain the old partition size. `sfdisk` itself
+notifies the kernel; no duplicate `partprobe` or size polling is needed.
 
 Arch Linux ARM initializes and populates the rootfs's pacman keyring before
 installing packages. Its temporary GPG agent is stopped before the chroot
 runtime mounts are released. Init supplies `/dev/fd` and the standard I/O links
 after mounting devtmpfs, so Bash process substitution works in those chroots.
+It mounts devpts for package-manager PTYs and moves both `/run` and `/tmp` into
+the installed root at handoff.
 
 `../adapters/catalog.json` is the installation source of truth consumed by the
 LightHouse creation assistant. It identifies the rootfs archive, checksum,
@@ -73,8 +88,11 @@ adapter and selectable software for Ubuntu, Fedora and Arch Linux ARM. The
 release workflow validates that catalog and publishes the complete adapter
 directory next to the kernel and initramfs. Adapters receive only the fixed
 `NP_*` environment documented above; they create the GPT/ext4 root, unpack and
-initialize the selected distribution, and stage network-dependent software as
-a one-shot service in the installed root. Ubuntu additionally offers an
+initialize the selected distribution, and install selected software in the
+same chroot phase. Software failures therefore return through the init recovery
+channel before handoff; no first-boot installation service or completion marker
+blocks guestd. Rosetta's mount/registration remains a normal boot service.
+Ubuntu additionally offers an
 experimental Steam choice using FEX for the client's 32-bit and 64-bit x86
 code. Its Wine choice instead installs Ubuntu's amd64 Wine loader and libraries;
 Apple's Virtualization translation layer runs that x86-64 process inside the

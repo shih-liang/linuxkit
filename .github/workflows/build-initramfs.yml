@@ -201,8 +201,8 @@ jobs:
         run: |
           set -eu
           cc -O2 -Wall -Wextra -Werror \
-            nativepipe-init/nativepipe-init.c -o nativepipe-init-self-test
-          ./nativepipe-init-self-test --self-test
+            nativepipe-init/test-nativepipe-init.c -o nativepipe-init-self-test
+          ./nativepipe-init-self-test
           mkdir -p initramfs-root/sbin
           "$CROSS_COMPILE"gcc -static -Os -Wall -Wextra -Werror \
             nativepipe-init/nativepipe-init.c \

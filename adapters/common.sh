@@ -26,19 +26,25 @@ unmount_target()
 
 cleanup_target_root()
 {
-	[ "${NP_TARGET_ROOT:-/}" = / ] ||
-		! mountpoint -q "$NP_TARGET_ROOT" || unmount_target "$NP_TARGET_ROOT" || true
+	[ "${NP_TARGET_ROOT:-/}" != / ] || return 0
+	unmount_target_runtime "$NP_TARGET_ROOT" || return 1
+	! mountpoint -q "$NP_TARGET_ROOT" || unmount_target "$NP_TARGET_ROOT"
 }
 
-trap cleanup_target_root EXIT HUP INT TERM
+trap 'status=$?; trap - EXIT; cleanup_target_root || status=1; exit "$status"' EXIT
+trap 'exit 1' HUP INT TERM
 
 selected()
 {
-	[ -f "$SELECTION_FILE" ] && grep -qx "$1" "$SELECTION_FILE"
+	[ -f "$SELECTION_FILE" ] && grep -Fxq "$1" "$SELECTION_FILE"
 }
 
 ensure_install_network()
 {
+	# Recovery may already have a lease from a previous/manual attempt.
+	if [ -s /etc/resolv.conf ] && ip -4 route show default | grep -q '^default'; then
+		return 0
+	fi
 	for interface_path in /sys/class/net/*; do
 		interface_name=${interface_path##*/}
 		# Built-in bonding/tunnel drivers also create interfaces, but they
@@ -56,45 +62,37 @@ ensure_install_network()
 mount_target_runtime()
 {
 	root=$1
-	mkdir -p "$root/dev" "$root/proc" "$root/sys" "$root/run" "$root/etc"
-	mount -o bind /dev "$root/dev" || return 1
-	if ! mount -o bind /proc "$root/proc"; then
-		unmount_target "$root/dev"
-		return 1
-	fi
-	if ! mount -o bind /sys "$root/sys"; then
-		unmount_target "$root/proc"
-		unmount_target "$root/dev"
-		return 1
-	fi
-	if ! rm -f "$root/etc/resolv.conf" ||
-		! cp /etc/resolv.conf "$root/etc/resolv.conf"; then
-		unmount_target_runtime "$root" || true
-		return 1
-	fi
+	# Bind only the installer payload, not all of initramfs /run. Package
+	# installation and optional software finish before switch_root/guestd.
+	for path in dev dev/pts proc sys run/nativepipe/payload; do
+		mkdir -p "$root/$path" || return 1
+		mount -o bind "/$path" "$root/$path" || return 1
+	done
+	mkdir -p "$root/etc" || return 1
+	rm -f "$root/etc/resolv.conf" && cp /etc/resolv.conf "$root/etc/resolv.conf"
 }
 
 unmount_target_runtime()
 {
 	root=$1 np_unmount_result=0
-	unmount_target "$root/sys" || np_unmount_result=1
-	unmount_target "$root/proc" || np_unmount_result=1
-	unmount_target "$root/dev" || np_unmount_result=1
+	for path in run/nativepipe/payload sys proc dev/pts dev; do
+		if mountpoint -q "$root/$path"; then
+			unmount_target "$root/$path" || np_unmount_result=1
+		fi
+	done
 	return "$np_unmount_result"
 }
 
 run_in_target()
-{
+(
 	root=$1
 	shift
+	# A signal or any failed mount must take the same cleanup path as chroot.
+	trap 'status=$?; trap - EXIT; unmount_target_runtime "$root" || status=1; exit "$status"' EXIT
+	trap 'exit 1' HUP INT TERM
 	mount_target_runtime "$root" || return 1
-	np_chroot_result=0
-	chroot "$root" "$@" || np_chroot_result=$?
-	if ! unmount_target_runtime "$root" && [ "$np_chroot_result" -eq 0 ]; then
-		np_chroot_result=1
-	fi
-	return "$np_chroot_result"
-}
+	chroot "$root" "$@"
+)
 
 partition_path()
 {
@@ -109,7 +107,7 @@ prepare_root_disk()
 {
 	: "${NP_TARGET_DISK:?missing NP_TARGET_DISK}"
 	: "${NP_TARGET_ROOT:?missing NP_TARGET_ROOT}"
-	cleanup_target_root
+	cleanup_target_root || fail "target is still mounted; refusing to format it"
 
 	/sbin/sfdisk --wipe always "$NP_TARGET_DISK" <<'EOF'
 label: gpt
@@ -117,7 +115,6 @@ unit: sectors
 
 start=2048, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="nativepipe-root"
 EOF
-	partprobe "$NP_TARGET_DISK"
 	partition=$(partition_path "$NP_TARGET_DISK")
 	i=0
 	while [ ! -b "$partition" ]; do
@@ -134,23 +131,14 @@ grow_root_disk()
 	: "${NP_TARGET_DISK:?missing NP_TARGET_DISK}"
 	partition=$(partition_path "$NP_TARGET_DISK")
 	[ -b "$partition" ] || fail "root partition does not exist: $partition"
-	cleanup_target_root
+	cleanup_target_root || fail "target is still mounted; refusing offline filesystem repair"
 
 	# The adapters in this catalog created one GPT ext4 root partition.  The
 	# host has already enlarged only the image; this adapter-owned operation
 	# extends partition 1 to the final sector without recreating the table.
 	/sbin/sfdisk --force -N 1 "$NP_TARGET_DISK" <<'EOF'
-,
+size=+
 EOF
-	partprobe "$NP_TARGET_DISK"
-	i=0
-	while [ "$i" -lt 100 ]; do
-		sectors=$(cat "/sys/class/block/${partition##*/}/size" 2>/dev/null || true)
-		[ -n "$sectors" ] && break
-		i=$((i + 1))
-		sleep 0.1
-	done
-	[ -n "${sectors:-}" ] || fail "resized partition did not reappear: $partition"
 
 	set +e
 	/sbin/e2fsck -pf "$partition"
@@ -211,7 +199,7 @@ EOF
 create_default_user()
 {
 	root=$1 user=${2:-nativepipe}
-	if ! run_in_target "$root" /usr/bin/id "$user" >/dev/null 2>&1; then
+	if ! grep -q "^${user}:" "$root/etc/passwd"; then
 		useradd=/usr/sbin/useradd
 		[ -x "$root$useradd" ] || useradd=/sbin/useradd
 		[ -x "$root$useradd" ] || fail "rootfs has no useradd"
@@ -280,7 +268,7 @@ EOF
 	cat > "$root/etc/systemd/system/lighthouse-rosetta.service" <<'EOF'
 [Unit]
 Description=Mount Apple Rosetta for Linux
-Before=lighthouse-software-install.service nativepipe-guestd.service
+Before=nativepipe-guestd.service
 
 [Service]
 Type=oneshot
@@ -290,34 +278,13 @@ EOF
 	enable_systemd_unit "$root" multi-user.target lighthouse-rosetta.service
 }
 
-stage_software_install()
+install_selected_software()
 {
 	root=$1
 	[ -s "$SELECTION_FILE" ] || return 0
-	mkdir -p "$root/var/lib/lighthouse" \
-		"$root/etc/systemd/system/nativepipe-guestd.service.d"
-	cp "$SELECTION_FILE" "$root/var/lib/lighthouse/software-selection"
-	cat > "$root/etc/systemd/system/lighthouse-software-install.service" <<'EOF'
-[Unit]
-Description=Install software selected in the LightHouse creation assistant
-Wants=network-online.target
-After=network-online.target
-Before=nativepipe-guestd.service
-ConditionPathExists=!/var/lib/lighthouse/software-complete
-
-[Service]
-Type=oneshot
-Environment=NP_TARGET_ROOT=/
-Environment=NP_SOURCE_PATH=/run/nativepipe/payload/source
-ExecStart=/bin/sh /run/nativepipe/payload/adapter.sh software
-ExecStartPost=/bin/sh -c 'touch /var/lib/lighthouse/software-complete'
-EOF
-	cat > "$root/etc/systemd/system/nativepipe-guestd.service.d/software.conf" <<'EOF'
-[Unit]
-Requires=lighthouse-software-install.service
-After=lighthouse-software-install.service
-EOF
-	enable_systemd_unit "$root" multi-user.target lighthouse-software-install.service
+	run_in_target "$root" /usr/bin/env \
+		NP_TARGET_ROOT=/ NP_SOURCE_PATH=/run/nativepipe/payload/source \
+		/bin/sh /run/nativepipe/payload/adapter.sh software
 }
 
 finish_rootfs()
@@ -328,15 +295,11 @@ finish_rootfs()
 	printf 'LABEL=nativepipe-root / ext4 defaults 0 1\n' > "$root/etc/fstab"
 	: > "$root/etc/machine-id"
 	create_default_user "$root" nativepipe
+	install_selected_software "$root"
+	# Chroot package operations use install-time DNS; publish the distro's
+	# normal boot resolver configuration only after the last chroot exits.
 	configure_network "$root"
 	install_guest_agent "$root"
 	install_rosetta_support "$root"
-	stage_software_install "$root"
 	sync
-}
-
-enable_rosetta()
-{
-	selected x86_64 || selected wine || return 0
-	/usr/libexec/nativepipe/mount-rosetta || fail "could not start Rosetta for Linux"
 }

@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-. /run/nativepipe/payload/common.sh
+. "${NP_SOURCE_PATH%/*}/common.sh"
 
 configure_amd64_wine()
 {
@@ -95,8 +95,9 @@ EOF
 	export DEBIAN_FRONTEND=noninteractive
 	run_in_target "$NP_TARGET_ROOT" /usr/bin/apt-get update
 	run_in_target "$NP_TARGET_ROOT" /usr/bin/apt-get install -y \
-		--no-install-recommends systemd-sysv systemd-resolved udev dbus \
+		--no-install-recommends systemd-sysv systemd-resolved udev dbus-user-session \
 		iproute2 util-linux kmod passwd sudo ca-certificates pipewire-audio \
+		xdg-user-dirs gsettings-desktop-schemas fonts-dejavu-core adwaita-icon-theme \
 		libgl1 libgles2 libegl1 libgl1-mesa-dri libegl-mesa0 libglx-mesa0 \
 		mesa-vulkan-drivers libwayland-server0 libxkbcommon0 \
 		libxcb1 libxcb-cursor0 xwayland
@@ -111,21 +112,22 @@ EOF
 	else
 		echo "lighthouse installer: Ubuntu repository has no xwayland-satellite; X11 integration is unavailable" >&2
 	fi
-	rm -f "$NP_TARGET_ROOT/usr/sbin/policy-rc.d"
 	finish_rootfs
+	rm -f "$NP_TARGET_ROOT/usr/sbin/policy-rc.d"
 	;;
 software)
-	enable_rosetta
 	configure_amd64_wine
-	packages="ca-certificates dbus-user-session sudo xdg-user-dirs"
+	packages=
 	selected developer-tools && packages="$packages build-essential curl git"
 	# Install the x86-64 Wine process and its amd64 libraries. Rosetta handles
 	# the ELF loader; --no-install-recommends deliberately excludes wine32/i386.
 	selected wine && packages="$packages wine wine64:amd64"
 	selected steam && packages="$packages curl software-properties-common"
 	export DEBIAN_FRONTEND=noninteractive
-	apt-get update
-	apt-get install -y --no-install-recommends $packages
+	if [ -n "$packages" ]; then
+		apt-get update
+		apt-get install -y --no-install-recommends $packages
+	fi
 	install_steam
 	;;
 repair)
