@@ -103,7 +103,7 @@ jobs:
             | sha256sum --check --strict -
           tar --extract --file "linux-${KERNEL_VERSION}.tar.xz"
 
-      - name: Merge Kata ARM64 and LightHouse configuration
+      - name: Merge Kata ARM64 and FluxWindow configuration
         env:
           GH_TOKEN: ${{ github.token }}
         if: inputs.reuse_release == ''
@@ -407,7 +407,7 @@ jobs:
           cp "linux-${KERNEL_VERSION}/System.map" "linux-${KERNEL_VERSION}/Module.symvers" artifact/
 
       - name: Upload kernel output
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lighthouse-kernel-arm64
           path: artifact/

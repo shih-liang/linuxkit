@@ -1,4 +1,4 @@
-name: Publish LightHouse kernel and initramfs
+name: Publish FluxWindow kernel and initramfs
 
 on:
   push:
@@ -94,7 +94,7 @@ jobs:
           persist-credentials: false
 
       - name: Download independent outputs
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: lighthouse-*-arm64
           merge-multiple: true
@@ -141,6 +141,6 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
             --draft --generate-notes \
-            --title "LightHouse Kernel ${KERNEL_VERSION}-${RELEASE_REVISION}" \
+            --title "FluxWindow Kernel ${KERNEL_VERSION}-${RELEASE_REVISION}" \
             release/*
           gh release edit "$RELEASE_TAG" --draft=false --prerelease
