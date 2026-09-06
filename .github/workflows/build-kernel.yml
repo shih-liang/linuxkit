@@ -52,6 +52,12 @@ jobs:
             echo "Release $RELEASE_TAG already exists." >&2
             exit 1
           fi
+          if tagged_sha="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null)"; then
+            if [ "$tagged_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $RELEASE_TAG already points to $tagged_sha, not this build ($GITHUB_SHA). Choose a new release revision."
+              exit 1
+            fi
+          fi
           {
             echo "tag=$RELEASE_TAG"
             echo "kernel_version=$kernel_version"
@@ -125,7 +131,10 @@ jobs:
             exit 1
           fi
           if tagged_sha="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null)"; then
-            test "$tagged_sha" = "$GITHUB_SHA"
+            if [ "$tagged_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $RELEASE_TAG points to $tagged_sha, not this build ($GITHUB_SHA); refusing to replace it."
+              exit 1
+            fi
           elif [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
             echo "Release tag $RELEASE_TAG is missing." >&2
             exit 1
