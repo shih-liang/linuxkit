@@ -39,6 +39,26 @@ selected()
 	[ -f "$SELECTION_FILE" ] && grep -Fxq "$1" "$SELECTION_FILE"
 }
 
+load_installation_account()
+{
+	# This is a two-line data file, never shell code. Do not log or export the
+	# password, and validate before touching the destination disk.
+	{
+		IFS= read -r install_user && IFS= read -r install_password ||
+			fail "enter an account and password in FluxWindow before installing"
+		if IFS= read -r extra; then fail "invalid installation account"; fi
+	} < "$PAYLOAD_ROOT/account"
+	case "$install_user" in
+		''|root|[!a-z]*|*[!a-z0-9_-]*) fail "invalid installation username" ;;
+	esac
+	[ "${#install_user}" -le 32 ] || fail "installation username is too long"
+	[ -n "$install_password" ] && [ "${#install_password}" -le 255 ] ||
+		fail "enter a password of 1–255 bytes"
+	case "$install_password" in
+		*"$(printf '\r')"*) fail "password cannot contain line breaks" ;;
+	esac
+}
+
 ensure_install_network()
 {
 	# Recovery may already have a lease from a previous/manual attempt.
@@ -105,6 +125,7 @@ partition_path()
 
 prepare_root_disk()
 {
+	load_installation_account
 	: "${NP_TARGET_DISK:?missing NP_TARGET_DISK}"
 	: "${NP_TARGET_ROOT:?missing NP_TARGET_ROOT}"
 	cleanup_target_root || fail "target is still mounted; refusing to format it"
@@ -196,15 +217,32 @@ EOF
 	enable_systemd_unit "$root" network-online.target systemd-networkd-wait-online.service
 }
 
-create_default_user()
+create_installation_user()
 {
-	root=$1 user=${2:-nativepipe}
+	root=$1 user=$install_user
+	user_id=$(awk -F: -v name="$user" '$1 == name { print $3 }' "$root/etc/passwd")
+	[ -z "$user_id" ] || [ "$user_id" -ge 1000 ] && [ "$user_id" != 65534 ] ||
+		fail "the selected username belongs to a system account"
 	if ! grep -q "^${user}:" "$root/etc/passwd"; then
 		useradd=/usr/sbin/useradd
 		[ -x "$root$useradd" ] || useradd=/sbin/useradd
 		[ -x "$root$useradd" ] || fail "rootfs has no useradd"
 		run_in_target "$root" "$useradd" -m -s /bin/bash "$user"
 	fi
+	usermod=/usr/sbin/usermod
+	[ -x "$root$usermod" ] || usermod=/sbin/usermod
+	[ -x "$root$usermod" ] || fail "rootfs has no usermod"
+	# Fresh upstream rootfs archives can contain known login credentials.
+	# Lock those inherited logins, not their system services or files.
+	for account in $(awk -F: '$3 == 0 || ($3 >= 1000 && $3 < 65534) { print $1 }' "$root/etc/passwd"); do
+		[ "$account" = "$user" ] || run_in_target "$root" "$usermod" -L "$account"
+	done
+	chpasswd=/usr/sbin/chpasswd
+	[ -x "$root$chpasswd" ] || chpasswd=/sbin/chpasswd
+	[ -x "$root$chpasswd" ] || fail "rootfs has no chpasswd"
+	printf '%s:%s\n' "$user" "$install_password" |
+		run_in_target "$root" "$chpasswd"
+	unset install_password
 
 	groups=
 	for group in sudo wheel audio video render input; do
@@ -213,17 +251,12 @@ create_default_user()
 		fi
 	done
 	if [ -n "$groups" ]; then
-		usermod=/usr/sbin/usermod
-		[ -x "$root$usermod" ] || usermod=/sbin/usermod
-		[ -x "$root$usermod" ] && run_in_target "$root" "$usermod" -aG "$groups" "$user"
+		run_in_target "$root" "$usermod" -aG "$groups" "$user"
 	fi
 
-	mkdir -p "$root/etc/systemd/system/serial-getty@hvc0.service.d"
-	cat > "$root/etc/systemd/system/serial-getty@hvc0.service.d/autologin.conf" <<EOF
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin $user --noclear %I \$TERM
-EOF
+	mkdir -p "$root/etc/sudoers.d"
+	printf '%s ALL=(ALL:ALL) ALL\n' "$user" > "$root/etc/sudoers.d/90-fluxwindow-user"
+	chmod 0440 "$root/etc/sudoers.d/90-fluxwindow-user"
 	enable_systemd_unit \
 		"$root" getty.target serial-getty@hvc0.service serial-getty@.service
 }
@@ -291,10 +324,10 @@ finish_rootfs()
 {
 	root=${NP_TARGET_ROOT:?missing NP_TARGET_ROOT}
 	[ -x "$root/sbin/init" ] || fail "installed rootfs has no /sbin/init"
-	printf 'nativepipe\n' > "$root/etc/hostname"
+	printf 'fluxwindow\n' > "$root/etc/hostname"
 	printf 'LABEL=nativepipe-root / ext4 defaults 0 1\n' > "$root/etc/fstab"
 	: > "$root/etc/machine-id"
-	create_default_user "$root" nativepipe
+	create_installation_user "$root"
 	install_selected_software "$root"
 	# Chroot package operations use install-time DNS; publish the distro's
 	# normal boot resolver configuration only after the last chroot exits.

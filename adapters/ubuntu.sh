@@ -51,8 +51,9 @@ install_steam()
 	# Steam is launched explicitly with FEXBash below. Installing FEX's global
 	# binfmt packages would steal x86-64 Wine processes from Apple Rosetta.
 	apt-get install -y --no-install-recommends fex-emu-armv8.0
-	runuser -u nativepipe -- env HOME=/home/nativepipe \
-		XDG_DATA_HOME=/home/nativepipe/.local/share \
+	IFS= read -r install_user < "$PAYLOAD_ROOT/account"
+	runuser -u "$install_user" -- env HOME="/home/$install_user" \
+		XDG_DATA_HOME="/home/$install_user/.local/share" \
 		FEXRootFSFetcher -y -a --distro-name Ubuntu \
 		--distro-version 24.04 --distro-list-first
 	steam_deb=/var/tmp/steam-launcher.deb

@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/reboot.h>
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>
 #include <sys/stat.h>
@@ -1237,14 +1238,32 @@ static int prepare_plan(struct np_plan *plan) {
     return 0;
 }
 
+static int power_off_recovery(void) {
+    logmsg("Recovery shell closed. Shutting down…");
+    close_control_transport();
+    /* This program is PID 1. Stop any jobs left behind by the recovery shell
+     * before unmounting repaired filesystems; never just exit PID 1. */
+    kill(-1, SIGTERM);
+    sleep_milliseconds(1000);
+    kill(-1, SIGKILL);
+    char *const unmount[] = {"/bin/umount", "-a", "-r", NULL};
+    if (run(unmount, NULL) != 0)
+        logmsg("some mounts could not be unmounted; syncing before power off");
+    sync();
+    return reboot(RB_POWER_OFF);
+}
+
 static int execute_plan(struct np_plan *plan, int connection, bool *response_sent) {
     *response_sent = false;
     if (plan->action == NP_ACTION_SHELL) {
         if (send_ack(connection, plan->request_id) < 0)
             return -1;
         *response_sent = true;
+        logmsg("Recovery shell. Type exit or press Ctrl+D to shut down this virtual machine.");
         char *const arguments[] = {"/bin/sh", "-l", NULL};
-        return run(arguments, NULL);
+        if (run(arguments, NULL) < 0)
+            return -1;
+        return power_off_recovery();
     }
     if (prepare_plan(plan) < 0)
         return -1;

@@ -1,6 +1,82 @@
+#define _GNU_SOURCE
+#include <signal.h>
+#include <sys/reboot.h>
+#include <unistd.h>
+
+/* Exercise shell completion without ever signaling processes, unmounting
+ * filesystems, or powering off the machine running this unit test. */
+static int test_kill(pid_t pid, int signal);
+static void test_sync(void);
+static int test_reboot(int command);
+static int test_execve(const char *path, char *const args[], char *const env[]);
+#define kill test_kill
+#define sync test_sync
+#define reboot test_reboot
+#define execve test_execve
 #define main nativepipe_init_main
 #include "nativepipe-init.c"
 #undef main
+#undef kill
+#undef sync
+#undef reboot
+#undef execve
+
+static int shell_exit_status;
+static int shutdown_step;
+
+static int test_kill(pid_t pid, int signal) {
+    if (pid != -1 || signal != (shutdown_step == 0 ? SIGTERM : SIGKILL))
+        abort();
+    shutdown_step++;
+    return 0;
+}
+
+static void test_sync(void) {
+    if (shutdown_step != 2) abort();
+    shutdown_step++;
+}
+
+static int test_reboot(int command) {
+    if (command != RB_POWER_OFF || shutdown_step != 3) abort();
+    shutdown_step++;
+    return 0;
+}
+
+static int test_execve(const char *path, char *const args[], char *const env[]) {
+    (void)env;
+    if (!strcmp(path, "/bin/sh") && !strcmp(args[1], "-l"))
+        _exit(shell_exit_status);
+    if (!strcmp(path, "/bin/umount") && !strcmp(args[1], "-a") &&
+        !strcmp(args[2], "-r") && shutdown_step == 2)
+        _exit(0);
+    abort();
+}
+
+static int test_recovery_shell_exit(void) {
+    for (int status = 0; status <= 7; status += 7) {
+        int sockets[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0) return 1;
+        control_connection = sockets[0];
+        struct np_plan plan;
+        initialize_plan(&plan);
+        plan.action = NP_ACTION_SHELL;
+        plan.request_id = 42;
+        shell_exit_status = status;
+        shutdown_step = 0;
+        bool response_sent = false;
+        if (execute_plan(&plan, sockets[0], &response_sent) != 0 ||
+            !response_sent || shutdown_step != 4 || control_connection != -1)
+            return 1;
+        uint8_t *response = NULL;
+        size_t length = 0;
+        if (receive_payload(sockets[1], &response, &length) < 0 || length != 12 ||
+            memcmp(response, "NPOK", 4) || read_le64(response + 4) != 42)
+            return 1;
+        free(response);
+        close(sockets[1]);
+    }
+    return 0;
+}
 
 static int self_test(const char *program_path) {
     char device_path[] = "/tmp/nativepipe-init-dev.XXXXXX";
@@ -104,5 +180,5 @@ static int self_test(const char *program_path) {
 
 int main(int argc, char **argv) {
     (void)argc;
-    return self_test(argv[0]);
+    return self_test(argv[0]) || test_recovery_shell_exit();
 }

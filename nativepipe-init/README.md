@@ -39,6 +39,11 @@ Init-only operations are:
 - `NPIM`: mount the exact identifier and partition selected by the host.
 - `NPIC`: boot, install, repair, or start a console shell.
 
+Exiting the recovery console shell (including Ctrl+D) stops any remaining
+recovery jobs, unmounts filesystems, syncs writes, and powers off the VM. The
+host's normal guest-stopped callback closes its windows. Closing only the
+console window is not a shell exit and does not shut down the VM.
+
 For boot/install/repair, `NPOK` is sent only after the adapter completed, the
 root and its ELF/script interpreter passed preflight, and all runtime mounts
 were moved successfully. Failures before that point return `NPER`; partial
@@ -54,10 +59,22 @@ Installer and repair adapters are data rather than compiled branches. The host
 provides a read-only virtiofs payload containing the selected adapter and its
 source, and `nativepipe-init` invokes it with a small fixed environment.
 
+Installation catalog revision 3 requires an explicit account. The host stages
+`account` as a private, two-line data file (username, password) alongside the
+installer payload, readable only by its owner on the Mac. Adapters validate it
+before formatting, use standard `chpasswd` through stdin, and never evaluate it
+as shell source. All supported distributions use the same account setup. Fresh
+rootfs default root/user logins are locked, the chosen account receives
+password-protected sudo access, and the console uses normal login. The host
+deletes the temporary credential file when installation is acknowledged (or on
+the first guestd connection), and refuses to export a VM while it contains that
+file. Failed installations retain it for retry. It is never part of saved VM
+configuration or kernel arguments. Existing VMs are not modified by this flow.
+
 The initramfs includes upstream static e2fsprogs binaries for ext2/3/4:
 `mke2fs` (`mkfs.ext4`), `e2fsck` (`fsck.ext4`), `resize2fs`, `tune2fs`,
-and `dumpe2fs`. util-linux supplies static `blkid` and `sfdisk`; the latter is
-the noninteractive GPT writer used by installation adapters. BusyBox supplies
+and `dumpe2fs`. util-linux supplies static `blkid`, `sfdisk`, and `lsblk` for
+filesystem identification, partition editing, and listing disks. BusyBox supplies
 the recovery shell, basic adapter
 commands, `mount`/`umount`, and the initramfs-specific `switch_root`; its `tc`,
 `blkid`, `fsck`, and `mkfs.ext2` applets are deliberately disabled.

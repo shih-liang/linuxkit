@@ -33,8 +33,10 @@ done
 run_busybox sh -ec 'test "$((2147483647 + 1))" = 2147483648'
 run_busybox sleep 0.01
 run_busybox sh "$repo/adapters/udhcpc.sh" --self-test
+run_busybox sh "$repo/scripts/test-installation-account.sh"
 
-for tool in blkid sfdisk; do
+for tool in blkid sfdisk lsblk; do
 	run_tool "$root/sbin/$tool" --version
 done
+run_tool "$root/sbin/lsblk" --list --noheadings --output NAME,TYPE,SIZE
 echo 'ARM64 initramfs shell, adapters, DHCP hook and disk tools passed'

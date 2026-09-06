@@ -118,9 +118,11 @@ jobs:
             --host="${CROSS_COMPILE%-}" \
             --disable-all-programs \
             --enable-blkid \
+            --enable-lsblk \
             --enable-fdisks \
             --enable-libblkid \
             --enable-libfdisk \
+            --enable-libmount \
             --enable-libsmartcols \
             --enable-libuuid \
             --enable-static-programs=blkid,sfdisk \
@@ -131,13 +133,16 @@ jobs:
             --without-python \
             --without-systemd \
             --without-udev
-          make -j"$(nproc)" blkid.static sfdisk.static
+          # lsblk has no upstream .static target. Link its normal target
+          # statically through libtool, alongside the dedicated disk targets.
+          make -j"$(nproc)" LDFLAGS=-all-static blkid.static sfdisk.static lsblk
           test -x blkid.static
           test -x sfdisk.static
           mkdir -p ../initramfs-root/sbin
           cp blkid.static ../initramfs-root/sbin/blkid
           cp sfdisk.static ../initramfs-root/sbin/sfdisk
-          for tool in blkid sfdisk; do
+          cp lsblk ../initramfs-root/sbin/lsblk
+          for tool in blkid sfdisk lsblk; do
             "${CROSS_COMPILE}strip" "../initramfs-root/sbin/$tool"
             if "${CROSS_COMPILE}readelf" -l "../initramfs-root/sbin/$tool" \
               | grep -q INTERP; then
@@ -230,7 +235,7 @@ jobs:
           test -x initramfs-root/sbin/switch_root
           test -x initramfs-root/usr/share/udhcpc/default.script
           test "$(readlink initramfs-root/sbin/switch_root)" = '../bin/busybox'
-          for tool in nativepipe-init mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid sfdisk; do
+          for tool in nativepipe-init mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid sfdisk lsblk; do
             test -x "initramfs-root/sbin/$tool"
           done
           mkdir -p initramfs-root/dev initramfs-root/proc initramfs-root/sys \
