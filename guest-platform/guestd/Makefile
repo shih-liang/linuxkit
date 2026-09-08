@@ -10,6 +10,7 @@ CLOUD_INIT := cloud_init_config.c
 ENVIRONMENT := environment_config.c
 MDEV := mdev_config.c
 SESSION_STACK := session_stack.c
+SHARED_FOLDERS := shared_folders.c
 VERSION := $(shell tr -d '[:space:]' < VERSION)
 CFLAGS := -I../common -O2 -static -s -pthread -DNP_GUESTD_VERSION=\"$(VERSION)\"
 HOST_CC ?= cc
@@ -18,19 +19,20 @@ HOST_CLOUD_TEST := /tmp/nativepipe-cloud-init-config-test
 HOST_ENVIRONMENT_TEST := /tmp/nativepipe-environment-config-test
 HOST_MDEV_TEST := /tmp/nativepipe-mdev-config-test
 HOST_SESSION_STACK_TEST := /tmp/nativepipe-session-stack-test
+HOST_SHARED_FOLDERS_TEST := /tmp/nativepipe-shared-folders-test
 
-.PHONY: all clean aarch64 x86_64 test test-console test-cloud-init test-environment test-mdev test-session-stack
+.PHONY: all clean aarch64 x86_64 test test-console test-cloud-init test-environment test-mdev test-session-stack test-shared-folders
 
 all: aarch64 x86_64
 
 aarch64: dist/nativepipe-guestd-aarch64
 x86_64: dist/nativepipe-guestd-x86_64
 
-dist/nativepipe-guestd-aarch64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(COMMON) VERSION | dist
-	$(ZIG) cc -target aarch64-linux-musl $(CFLAGS) -o $@ nativepipe-guestd.c $(CONSOLE) $(CLOUD_INIT) $(ENVIRONMENT) $(SESSION_STACK) $(COMMON) -lutil
+dist/nativepipe-guestd-aarch64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(SHARED_FOLDERS) shared_folders.h $(COMMON) VERSION | dist
+	$(ZIG) cc -target aarch64-linux-musl $(CFLAGS) -o $@ nativepipe-guestd.c $(CONSOLE) $(CLOUD_INIT) $(ENVIRONMENT) $(SESSION_STACK) $(SHARED_FOLDERS) $(COMMON) -lutil
 
-dist/nativepipe-guestd-x86_64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(COMMON) VERSION | dist
-	$(ZIG) cc -target x86_64-linux-musl $(CFLAGS) -o $@ nativepipe-guestd.c $(CONSOLE) $(CLOUD_INIT) $(ENVIRONMENT) $(SESSION_STACK) $(COMMON) -lutil
+dist/nativepipe-guestd-x86_64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(SHARED_FOLDERS) shared_folders.h $(COMMON) VERSION | dist
+	$(ZIG) cc -target x86_64-linux-musl $(CFLAGS) -o $@ nativepipe-guestd.c $(CONSOLE) $(CLOUD_INIT) $(ENVIRONMENT) $(SESSION_STACK) $(SHARED_FOLDERS) $(COMMON) -lutil
 
 test: test-console test-cloud-init test-environment test-mdev test-session-stack
 
@@ -57,6 +59,12 @@ test-session-stack: $(SESSION_STACK) session_stack.h tests/session_stack_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I. -o $(HOST_SESSION_STACK_TEST) \
 		$(SESSION_STACK) tests/session_stack_test.c
 	$(HOST_SESSION_STACK_TEST)
+
+# Integration check: run as root inside Linux with the shared-folder device.
+test-shared-folders: $(SHARED_FOLDERS) shared_folders.h tests/shared_folders_test.c
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -pthread -I. -I../common \
+		-o $(HOST_SHARED_FOLDERS_TEST) $(SHARED_FOLDERS) $(COMMON) tests/shared_folders_test.c
+	$(HOST_SHARED_FOLDERS_TEST)
 
 dist:
 	mkdir -p dist

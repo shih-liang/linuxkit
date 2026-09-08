@@ -245,7 +245,8 @@ create_installation_user()
 	unset install_password
 
 	groups=
-	for group in sudo wheel audio video render input; do
+	# Additional groups are an explicit adapter choice, not a shared policy.
+	for group in sudo wheel audio video render input ${2:-}; do
 		if grep -q "^${group}:" "$root/etc/group"; then
 			groups=${groups:+$groups,}$group
 		fi
@@ -327,8 +328,13 @@ finish_rootfs()
 	printf 'fluxwindow\n' > "$root/etc/hostname"
 	printf 'LABEL=nativepipe-root / ext4 defaults 0 1\n' > "$root/etc/fstab"
 	: > "$root/etc/machine-id"
-	create_installation_user "$root"
+	create_installation_user "$root" "${1:-}"
 	install_selected_software "$root"
+	# Enable the selected user's packaged services without a running user bus.
+	# Offline mode writes links locally; --no-reload skips the manager reload.
+	run_in_target "$root" /usr/sbin/runuser -u "$install_user" -- \
+		/usr/bin/env SYSTEMD_OFFLINE=1 /usr/bin/systemctl --user --no-reload enable \
+		pipewire.service pipewire-pulse.service wireplumber.service
 	# Chroot package operations use install-time DNS; publish the distro's
 	# normal boot resolver configuration only after the last chroot exits.
 	configure_network "$root"

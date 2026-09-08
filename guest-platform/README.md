@@ -25,15 +25,31 @@ make -C guest-platform test-license
 make -C guest-platform build
 ```
 
-`.github/workflows/build-linux.yml` runs these steps for every push to
-`main`. Its `linuxkit-linux` artifact is checkout-shaped: downloading it at
+`.github/workflows/build-linux.yml` runs these steps for `linuxkit-guest-v*`
+tags or a manual workflow dispatch, not ordinary pushes to `main`.
+Its `linuxkit-linux` artifact is checkout-shaped: downloading it at
 the repository root restores `guest-platform/build/aarch64` and
 `guest-platform/build/x86_64`. FluxWindow copies those binaries together with
 the adapters, service files, and catalogs from the same local checkout.
 
-Kernel and initramfs builds remain separate in `build-kernel.yml`; they are
+Kernel and initramfs builds use `build-kernel.yml` and `build-initramfs.yml`; they are
 downloaded by FluxWindow as VM boot resources and are not embedded in the
 application's guest runtime.
+
+## Shared folders
+
+guestd does not mount the host shared-folder device at startup. After the
+handshake, FluxWindow sends `NPSF` (request ID and one mounted/unmounted byte)
+over the existing binary control channel, according to the VM's configured
+folders. The capability is `fs.shared-folders` (guestd 0.2.38).
+The device remains attached even when empty; no folder means no mount.
+Removing the last folder requires a normal unmount before revoking the export.
+Busy mounts return an error, never a forced or lazy unmount.
+
+Inside a Linux VM with the shared-folder device, root can run
+`make -C guest-platform/guestd test-shared-folders`. The test changes mounts
+only inside a private mount namespace and checks idempotence, busy files and
+refusal to unmount an unrelated filesystem.
 
 ## GitHub releases
 

@@ -9,6 +9,7 @@
 #include "cloud_init_config.h"
 #include "environment_config.h"
 #include "session_stack.h"
+#include "shared_folders.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -34,8 +35,6 @@
 
 #define CONSOLE_TTY "/dev/hvc0"
 #define CONSOLE_INTEGRATION_STAMP "/var/lib/nativepipe/console-integration.version"
-#define HOST_SHARE_TAG "lighthouse-shares"
-#define HOST_SHARE_MOUNT "/mnt/lighthouse"
 
 /* Baked in at build time from ./VERSION (−DNP_GUESTD_VERSION=…). */
 #ifndef NP_GUESTD_VERSION
@@ -62,33 +61,6 @@ __attribute__((used)) static const char np_guestd_version_record[] =
 
 static void logmsg(const char *msg) {
     fprintf(stderr, "[guestd] %s\n", msg);
-}
-
-static void *mount_host_shares(void *unused) {
-    (void)unused;
-    if (geteuid() != 0)
-        return NULL;
-    if (np_mkdir_p(HOST_SHARE_MOUNT) < 0) {
-        logmsg("cannot create /mnt/lighthouse");
-        return NULL;
-    }
-    for (int attempt = 0; attempt < 20; attempt++) {
-        if (mount(HOST_SHARE_TAG, HOST_SHARE_MOUNT, "virtiofs",
-                  MS_NODEV | MS_NOSUID, NULL) == 0) {
-            logmsg("host shared folders mounted at /mnt/lighthouse");
-            return NULL;
-        }
-        if (errno == EBUSY)
-            return NULL;
-        if (errno != ENODEV && errno != ENOENT && errno != EAGAIN) {
-            fprintf(stderr, "[guestd] cannot mount host shared folders: %s\n",
-                    strerror(errno));
-            return NULL;
-        }
-        usleep(250000);
-    }
-    logmsg("host shared-folder device did not become ready");
-    return NULL;
 }
 
 /* Request handlers may complete out of order. Serialize complete NPIP writes
@@ -2733,10 +2705,10 @@ static size_t guest_info_encoded_size(const struct guest_info *gi) {
     const char *caps[] = {
         "console.resize", "process.launch", "process.run", "process.exec", "fs.read", "fs.stat", "fs.write",
         "account.credentials", "agent.version", "environment.catalog", "resource.sync.v1",
-        "integration.desktop-preferences",
+        "integration.desktop-preferences", "fs.shared-folders",
         "display.wayland",
     };
-    int ncap = gi->have_wayland ? 13 : 12;
+    int ncap = gi->have_wayland ? 14 : 13;
     size_t n = 2;
     for (int i = 0; i < 5; i++)
         n += 2 + strlen(fields[i]);
@@ -2757,10 +2729,10 @@ static size_t encode_guest_info(uint8_t *p, const struct guest_info *gi) {
     const char *caps[] = {
         "console.resize", "process.launch", "process.run", "process.exec", "fs.read", "fs.stat", "fs.write",
         "account.credentials", "agent.version", "environment.catalog", "resource.sync.v1",
-        "integration.desktop-preferences",
+        "integration.desktop-preferences", "fs.shared-folders",
         "display.wayland",
     };
-    int ncap = gi->have_wayland ? 13 : 12;
+    int ncap = gi->have_wayland ? 14 : 13;
     uint8_t *start = p;
     for (int i = 0; i < 5; i++) {
         size_t len = strlen(fields[i]);
@@ -3245,6 +3217,22 @@ static int handle_write_path(int fd, const uint8_t *payload, size_t n) {
     return send_ok(fd, id);
 }
 
+static int handle_shared_folders(int fd, const uint8_t *payload, size_t n) {
+    size_t off = 4;
+    uint64_t id;
+    if (rd_u64(payload, n, &off, &id) < 0)
+        return -1;
+    if (n != off + 1 || payload[off] > 1)
+        return send_bin_error(fd, id, EINVAL, "bad shared-folder request");
+    if (np_shared_folders_set_mounted(payload[off]) < 0) {
+        int error = errno;
+        return send_bin_error(fd, id, (uint32_t)error,
+                              error == EBUSY ? "Shared folders are in use. Close their files and try again."
+                                             : strerror(error));
+    }
+    return send_ok(fd, id);
+}
+
 struct control_job {
     int fd;
     uint8_t *payload;
@@ -3253,6 +3241,7 @@ struct control_job {
 
 static int is_async_control_request(const uint8_t *payload) {
     return memcmp(payload, "NPSY", 4) == 0 ||
+           memcmp(payload, "NPSF", 4) == 0 ||
            memcmp(payload, "NPDP", 4) == 0 ||
            memcmp(payload, "NPEU", 4) == 0 ||
            memcmp(payload, "NPRU", 4) == 0 ||
@@ -3268,6 +3257,8 @@ static void *serve_control_job(void *arg) {
     size_t n = job->len;
     if (memcmp(payload, "NPSY", 4) == 0)
         handle_resource_sync(job->fd, payload, n);
+    else if (memcmp(payload, "NPSF", 4) == 0)
+        handle_shared_folders(job->fd, payload, n);
     else if (memcmp(payload, "NPDP", 4) == 0)
         handle_desktop_preferences(job->fd, payload, n);
     else if (memcmp(payload, "NPEU", 4) == 0)
@@ -3344,6 +3335,8 @@ static void *serve_session(void *arg) {
             handle_environment_refresh(fd, payload, (size_t)n);
         else if (memcmp(payload, "NPSY", 4) == 0)
             handle_resource_sync(fd, payload, (size_t)n);
+        else if (memcmp(payload, "NPSF", 4) == 0)
+            handle_shared_folders(fd, payload, (size_t)n);
         else if (memcmp(payload, "NPDP", 4) == 0)
             handle_desktop_preferences(fd, payload, (size_t)n);
         else if (memcmp(payload, "NPRZ", 4) == 0)
@@ -3434,13 +3427,6 @@ int main(int argc, char **argv) {
         }
     }
     boot_self_update();
-    {
-        pthread_t th;
-        if (pthread_create(&th, NULL, mount_host_shares, NULL) == 0)
-            pthread_detach(th);
-        else
-            logmsg("cannot start host shared-folder mount worker");
-    }
     {
         pthread_t th;
         pthread_create(&th, NULL, session_stack_thread, NULL);

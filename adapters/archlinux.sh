@@ -16,11 +16,12 @@ install)
 		pacman -Syu --noconfirm --needed \
 			systemd iproute2 util-linux kmod shadow sudo ca-certificates dbus \
 			xdg-user-dirs gsettings-desktop-schemas ttf-dejavu adwaita-icon-theme \
-			pipewire pipewire-audio pipewire-pulse wireplumber \
+			pipewire pipewire-audio pipewire-alsa pipewire-pulse wireplumber \
+			rtkit realtime-privileges \
 			mesa vulkan-virtio wayland libxkbcommon libxcb xcb-util-cursor \
 			vulkan-icd-loader xorg-xwayland xwayland-satellite
 	'
-	finish_rootfs
+	finish_rootfs realtime
 	;;
 software)
 	if selected developer-tools; then

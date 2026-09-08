@@ -22,9 +22,9 @@ install)
 	ensure_install_network
 	run_in_target "$NP_TARGET_ROOT" /usr/bin/dnf -y install \
 		systemd systemd-pam systemd-udev systemd-networkd systemd-resolved \
-		util-linux-core shadow-utils iproute dbus-daemon sudo ca-certificates \
+		util-linux shadow-utils iproute dbus-daemon sudo ca-certificates \
 		xdg-user-dirs gsettings-desktop-schemas dejavu-sans-fonts adwaita-icon-theme \
-		kmod pipewire pipewire-alsa pipewire-pulseaudio wireplumber \
+		kmod pipewire pipewire-alsa pipewire-pulseaudio wireplumber rtkit \
 		mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers \
 		libglvnd-gles libwayland-client libwayland-server libxkbcommon libxcb \
 		xcb-util-cursor vulkan-loader xorg-x11-server-Xwayland \

@@ -97,7 +97,8 @@ EOF
 	run_in_target "$NP_TARGET_ROOT" /usr/bin/apt-get update
 	run_in_target "$NP_TARGET_ROOT" /usr/bin/apt-get install -y \
 		--no-install-recommends systemd-sysv systemd-resolved udev dbus-user-session \
-		iproute2 util-linux kmod passwd sudo ca-certificates pipewire-audio \
+		iproute2 util-linux kmod passwd sudo ca-certificates pipewire-audio rtkit \
+		libpam-systemd libpam-modules libpam-runtime \
 		xdg-user-dirs gsettings-desktop-schemas fonts-dejavu-core adwaita-icon-theme \
 		libgl1 libgles2 libegl1 libgl1-mesa-dri libegl-mesa0 libglx-mesa0 \
 		mesa-vulkan-drivers libwayland-server0 libxkbcommon0 \

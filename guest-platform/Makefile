@@ -13,12 +13,14 @@ GUESTD_SOURCES := \
 	guestd/console_config.c \
 	guestd/cloud_init_config.c \
 	guestd/environment_config.c \
-	guestd/session_stack.c
+	guestd/session_stack.c \
+	guestd/shared_folders.c
 GUESTD_HEADERS := \
 	guestd/console_config.h \
 	guestd/cloud_init_config.h \
 	guestd/environment_config.h \
-	guestd/session_stack.h
+	guestd/session_stack.h \
+	guestd/shared_folders.h
 TARGET_CFLAGS := -std=c11 -Icommon -O2 -static -s
 GUESTD_CFLAGS := $(TARGET_CFLAGS) -pthread -DNP_GUESTD_VERSION=\"$(VERSION)\"
 HOST_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -O2
@@ -81,7 +83,7 @@ test: \
 	build/host-tests/environment-config \
 	build/host-tests/mdev-config \
 	build/host-tests/session-stack
-	@for test_binary in $^; do "$$test_binary"; done
+	@for test_binary in $^; do "$$test_binary" || exit $$?; done
 
 test-license:
 	$(PYTHON) scripts/check-license-inventory.py
