@@ -19,6 +19,7 @@
 #define NP_AGENT_MAGIC "NPAG"
 #define NP_NPIP_MAGIC "NPIP"
 #define NP_WIRE_VERSION 1
+#define NP_AGENT_WIRE_VERSION 1
 
 #define NP_STATUS_FILE 0
 #define NP_STATUS_UPTODATE 1
@@ -62,10 +63,14 @@ int np_write_version(const char *ver);
 int np_read_version(char *out, size_t cap);
 int np_copy_file(const char *src, const char *dst, int mode);
 int np_run(char *const argv[]);
+/* Child-side exec preparation; preserve stdio, never inherit agent FDs. */
+int np_child_cloexec(void);
 
 /* Connect to host CID 2. retries is attempts with 1s sleep; 0 means once. */
 int np_vsock_connect_host(uint32_t port, int retries);
 int np_vsock_listen(uint32_t port, int backlog);
+/* An AF_VSOCK listener also accepts guest-local loopback connections. */
+int np_vsock_peer_is_host(int fd);
 
 typedef struct {
     uint8_t status;

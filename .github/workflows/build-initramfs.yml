@@ -22,6 +22,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check out shared file RPC
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          repository: shih-liang/nativepipe
+          path: .deps/nativepipe
+          sparse-checkout: common/file_rpc
+          persist-credentials: false
+
       - name: Read source versions
         shell: bash
         run: |
@@ -205,12 +213,17 @@ jobs:
       - name: Compile and self-test nativepipe-init
         run: |
           set -eu
-          cc -O2 -Wall -Wextra -Werror \
-            nativepipe-init/test-nativepipe-init.c -o nativepipe-init-self-test
+          rpc="$PWD/.deps/nativepipe/common/file_rpc"
+          make -C "$rpc" test
+          cc -O2 -Wall -Wextra -Werror -pthread -I"$rpc" \
+            nativepipe-init/test-nativepipe-init.c "$rpc/build/libnativepipe-file-rpc.a" \
+            -o nativepipe-init-self-test
           ./nativepipe-init-self-test
           mkdir -p initramfs-root/sbin
-          "$CROSS_COMPILE"gcc -static -Os -Wall -Wextra -Werror \
+          make -C "$rpc" CC="${CROSS_COMPILE}gcc" AR="${CROSS_COMPILE}ar" BUILD=build-arm64
+          "$CROSS_COMPILE"gcc -static -Os -Wall -Wextra -Werror -pthread -I"$rpc" \
             nativepipe-init/nativepipe-init.c \
+            "$rpc/build-arm64/libnativepipe-file-rpc.a" \
             -o initramfs-root/sbin/nativepipe-init
           "$CROSS_COMPILE"strip initramfs-root/sbin/nativepipe-init
           if "$CROSS_COMPILE"readelf -l initramfs-root/sbin/nativepipe-init | grep -q INTERP; then

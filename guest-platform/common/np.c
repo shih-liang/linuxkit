@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "np.h"
+#include "np_file_rpc.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -12,6 +13,10 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <linux/close_range.h>
+#include <sys/syscall.h>
+#endif
 
 #ifndef AF_VSOCK
 #define AF_VSOCK 40
@@ -74,6 +79,7 @@ int np_write_full(int fd, const void *buf, size_t n) {
                 continue;
             return -1;
         }
+        if (!w) { errno = EIO; return -1; }
         sent += (size_t)w;
     }
     return 0;
@@ -136,13 +142,14 @@ int np_write_file(const char *path, const void *data, size_t n, int mode) {
         if (np_mkdir_p(dir) < 0)
             return -1;
     }
-    int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, mode);
+    int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, mode);
     if (fd < 0)
         return -1;
     int rc = np_write_full(fd, data, n);
-    close(fd);
-    if (rc == 0)
-        chmod(path, (mode_t)mode);
+    if (rc == 0) rc = fchmod(fd, (mode_t)mode);
+    int saved = errno;
+    if (close(fd) < 0 && rc == 0) return -1;
+    errno = saved;
     return rc;
 }
 
@@ -214,20 +221,34 @@ int np_copy_file(const char *src, const char *dst, int mode) {
     return 0;
 }
 
+int np_child_cloexec(void) {
+#ifdef __linux__
+    /* In the forked child only. This covers even descriptors another agent
+     * thread opened just before fork, without a million-FD scanning loop. */
+    return (int)syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC);
+#else
+    /* Common transport unit tests also build on macOS; guest programs do not. */
+    return 0;
+#endif
+}
+
 int np_run(char *const argv[]) {
     pid_t pid = fork();
     if (pid < 0)
         return -1;
     if (pid == 0) {
+        if (np_child_cloexec() < 0) _exit(126);
         execvp(argv[0], argv);
         _exit(127);
     }
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0)
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited < 0)
         return -1;
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
-    return 1;
+    return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
 }
 
 int np_vsock_connect_host(uint32_t port, int retries) {
@@ -253,6 +274,15 @@ int np_vsock_connect_host(uint32_t port, int retries) {
     if (fd >= 0)
         close(fd);
     return -1;
+}
+
+int np_vsock_peer_is_host(int fd) {
+    struct sockaddr_vm peer;
+    socklen_t size = sizeof(peer);
+    memset(&peer, 0, sizeof(peer));
+    return getpeername(fd, (struct sockaddr *)&peer, &size) == 0 &&
+           size >= offsetof(struct sockaddr_vm, svm_zero) &&
+           peer.svm_family == AF_VSOCK && peer.svm_cid == NP_CID_HOST;
 }
 
 int np_vsock_listen(uint32_t port, int backlog) {
@@ -290,8 +320,8 @@ int np_agent_send_request(int fd, const char *name, const char *ver) {
     }
     uint8_t hdr[8];
     memcpy(hdr, NP_AGENT_MAGIC, 4);
-    hdr[4] = NP_WIRE_VERSION;
-    hdr[5] = 0;
+    hdr[4] = NP_AGENT_WIRE_VERSION;
+    hdr[5] = 1; /* Request the shared NPFR chunked payload. */
     hdr[6] = (uint8_t)(name_len & 0xff);
     hdr[7] = (uint8_t)((name_len >> 8) & 0xff);
     uint8_t ver_len_buf[2] = {(uint8_t)(ver_len & 0xff), (uint8_t)((ver_len >> 8) & 0xff)};
@@ -311,7 +341,7 @@ int np_agent_recv_hdr(int fd, np_agent_hdr *hdr) {
     uint8_t rhdr[8];
     if (np_read_full(fd, rhdr, sizeof(rhdr)) < 0)
         return -1;
-    if (memcmp(rhdr, NP_AGENT_MAGIC, 4) != 0 || rhdr[4] != NP_WIRE_VERSION) {
+    if (memcmp(rhdr, NP_AGENT_MAGIC, 4) != 0 || rhdr[4] != NP_AGENT_WIRE_VERSION) {
         errno = EPROTO;
         return -1;
     }
@@ -373,16 +403,11 @@ int np_agent_recv_payload_file(int fd, uint64_t len, const char *path, int mode)
     int out = mkstemp(tmp);
     if (out < 0)
         return -1;
-    uint8_t buf[65536];
-    uint64_t left = len;
-    while (left > 0) {
-        size_t chunk = left > sizeof(buf) ? sizeof(buf) : (size_t)left;
-        if (np_read_full(fd, buf, chunk) < 0 || np_write_full(out, buf, chunk) < 0) {
-            close(out);
-            unlink(tmp);
-            return -1;
-        }
-        left -= chunk;
+    fcntl(out, F_SETFD, FD_CLOEXEC);
+    uint64_t received = 0;
+    if (np_file_receive_stream(fd, out, len, &received) < 0 || received != len) {
+        int error = errno ? errno : EPROTO;
+        close(out); unlink(tmp); errno = error; return -1;
     }
     int finalize_rc = 0;
     if (fchmod(out, (mode_t)mode) < 0 || fsync(out) < 0)
@@ -405,12 +430,21 @@ int np_agent_recv_payload_file(int fd, uint64_t len, const char *path, int mode)
 }
 
 int np_agent_recv_payload_mem(int fd, uint64_t len, uint8_t **out, size_t *out_len) {
+    if (!len || len > NP_MAX_AGENT_PAYLOAD || len > SIZE_MAX) { errno = EMSGSIZE; return -1; }
     uint8_t *buf = malloc((size_t)len);
     if (!buf)
         return -1;
-    if (np_read_full(fd, buf, (size_t)len) < 0) {
-        free(buf);
-        return -1;
+    uint64_t total = 0;
+    struct np_file_frame frame;
+    for (;;) {
+        if (np_file_receive(fd, &frame) < 0) { free(buf); return -1; }
+        if (frame.status) { free(buf); errno = (int)frame.status; return -1; }
+        if (frame.type == NP_FILE_END && frame.length == 8 && total == len &&
+            np_file_u64(frame.data) == total) break;
+        if (frame.type != NP_FILE_DATA || !frame.length || frame.length > len - total) {
+            free(buf); errno = EPROTO; return -1;
+        }
+        memcpy(buf + total, frame.data, frame.length); total += frame.length;
     }
     *out = buf;
     *out_len = (size_t)len;
@@ -418,15 +452,13 @@ int np_agent_recv_payload_mem(int fd, uint64_t len, uint8_t **out, size_t *out_l
 }
 
 int np_agent_discard_payload(int fd, uint64_t len) {
-    uint8_t buf[65536];
-    uint64_t left = len;
-    while (left > 0) {
-        size_t chunk = left > sizeof(buf) ? sizeof(buf) : (size_t)left;
-        if (np_read_full(fd, buf, chunk) < 0)
-            return -1;
-        left -= chunk;
-    }
-    return 0;
+    int out = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (out < 0) return -1;
+    uint64_t received = 0;
+    int rc = np_file_receive_stream(fd, out, len, &received);
+    int error = errno; close(out); errno = error;
+    if (rc == 0 && received != len) { errno = EPROTO; return -1; }
+    return rc;
 }
 
 static int pull_common(const char *name, const char *ver, int *out_fd, np_agent_hdr *hdr,

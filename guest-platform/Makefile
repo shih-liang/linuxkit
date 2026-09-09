@@ -6,22 +6,24 @@ ZIG_LOCAL_CACHE_DIR ?= $(CURDIR)/build/zig-local-cache
 export ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
 
 VERSION := $(shell tr -d '[:space:]' < guestd/VERSION)
-COMMON_SOURCE := common/np.c
-COMMON_HEADER := common/np.h
+FILE_RPC_DIR ?= $(abspath ../../nativepipe/common/file_rpc)
+COMMON_SOURCE := common/np.c $(FILE_RPC_DIR)/np_file_wire.c
+COMMON_HEADER := common/np.h $(FILE_RPC_DIR)/np_file_rpc.h
 GUESTD_SOURCES := \
-	guestd/nativepipe-guestd.c \
+	guestd/nativepipe-guestd.c guestd/exec_stream.c \
 	guestd/console_config.c \
 	guestd/cloud_init_config.c \
 	guestd/environment_config.c \
 	guestd/session_stack.c \
-	guestd/shared_folders.c
+	guestd/shared_folders.c \
+	$(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c
 GUESTD_HEADERS := \
-	guestd/console_config.h \
+	guestd/console_config.h guestd/exec_stream.h \
 	guestd/cloud_init_config.h \
 	guestd/environment_config.h \
 	guestd/session_stack.h \
 	guestd/shared_folders.h
-TARGET_CFLAGS := -std=c11 -Icommon -O2 -static -s
+TARGET_CFLAGS := -std=c11 -Icommon -I$(FILE_RPC_DIR) -O2 -static -s
 GUESTD_CFLAGS := $(TARGET_CFLAGS) -pthread -DNP_GUESTD_VERSION=\"$(VERSION)\"
 HOST_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -O2
 
@@ -54,7 +56,7 @@ build/x86_64/nativepipe-guestd: $(GUESTD_SOURCES) $(GUESTD_HEADERS) $(COMMON_SOU
 
 build/host-tests/atomic-receive: common/tests/atomic_receive_test.c $(COMMON_SOURCE) $(COMMON_HEADER)
 	@mkdir -p $(@D)
-	$(HOST_CC) $(HOST_CFLAGS) -pthread -Icommon -o $@ $< $(COMMON_SOURCE)
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -Icommon -I$(FILE_RPC_DIR) -o $@ $< $(COMMON_SOURCE)
 
 build/host-tests/console-config: guestd/tests/console_config_test.c guestd/console_config.c guestd/console_config.h
 	@mkdir -p $(@D)
@@ -76,13 +78,18 @@ build/host-tests/session-stack: guestd/tests/session_stack_test.c guestd/session
 	@mkdir -p $(@D)
 	$(HOST_CC) $(HOST_CFLAGS) -Iguestd -o $@ guestd/session_stack.c $<
 
-test: \
+build/host-tests/exec-stream: guestd/exec_stream.c guestd/exec_stream.h guestd/tests/exec_stream_test.c
+	@mkdir -p $(@D)
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -Iguestd guestd/tests/exec_stream_test.c guestd/exec_stream.c -o $@
+
+test: build/host-tests/exec-stream \
 	build/host-tests/atomic-receive \
 	build/host-tests/console-config \
 	build/host-tests/cloud-init-config \
 	build/host-tests/environment-config \
 	build/host-tests/mdev-config \
 	build/host-tests/session-stack
+	$(MAKE) -C $(FILE_RPC_DIR) test
 	@for test_binary in $^; do "$$test_binary" || exit $$?; done
 
 test-license:

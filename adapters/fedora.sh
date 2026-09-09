@@ -24,6 +24,7 @@ install)
 		systemd systemd-pam systemd-udev systemd-networkd systemd-resolved \
 		util-linux shadow-utils iproute dbus-daemon sudo ca-certificates \
 		xdg-user-dirs gsettings-desktop-schemas dejavu-sans-fonts adwaita-icon-theme \
+		glib2 gdk-pixbuf2 librsvg2 \
 		kmod pipewire pipewire-alsa pipewire-pulseaudio wireplumber rtkit \
 		mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers \
 		libglvnd-gles libwayland-client libwayland-server libxkbcommon libxcb \

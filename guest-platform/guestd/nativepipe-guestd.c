@@ -5,11 +5,13 @@
  * Guest-initiated artifact pull: NPAG on host-listened vsock 1029 (shared np.c).
  */
 #include "np.h"
+#include "np_file_rpc.h"
 #include "console_config.h"
 #include "cloud_init_config.h"
 #include "environment_config.h"
 #include "session_stack.h"
 #include "shared_folders.h"
+#include "exec_stream.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -20,17 +22,20 @@
 #include <pty.h>
 #include <pwd.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CONSOLE_TTY "/dev/hvc0"
@@ -52,25 +57,55 @@ __attribute__((used)) static const char np_guestd_version_record[] =
 #define NP_MAX_READ (7u * 1024u * 1024u)
 #define NP_MAX_STDERR (256u * 1024u)
 #define NP_MAX_STDIN (64u * 1024u)
-#define NP_LIST_NAME_BUDGET (64u * 1024u)
-#define NP_LIST_HAS_MORE 1u
-#define NP_LIST_NAME_TRUNC 2u
-#define NP_ENTRY_CONT 1u
-#define NP_ENTRY_INCOMPLETE 2u
 #define NP_SETUSER_HAS_OLD 1u
 
 static void logmsg(const char *msg) {
     fprintf(stderr, "[guestd] %s\n", msg);
 }
 
+/* Async handlers must not share getpwnam()'s static result. Each lookup owns
+ * its storage until the handler (or its forked child) has finished using it. */
+struct account_info { struct passwd value; char text[16384]; };
+static struct passwd *lookup_user(const char *name, struct account_info *account) {
+    struct passwd *result = NULL;
+    int error = getpwnam_r(name, &account->value, account->text, sizeof(account->text), &result);
+    if (error || !result) { errno = error ? error : ENOENT; return NULL; }
+    return result;
+}
+
 /* Request handlers may complete out of order. Serialize complete NPIP writes
  * so frame headers and payloads from different workers can never interleave. */
-static pthread_mutex_t control_send_lock = PTHREAD_MUTEX_INITIALIZER;
+struct control_peer {
+    int fd;
+    pthread_mutex_t send_lock;
+    _Atomic unsigned references;
+    _Atomic unsigned jobs;
+};
+static struct control_peer *control_peer_create(int fd) {
+    struct control_peer *peer = calloc(1, sizeof(*peer));
+    if (!peer) return NULL;
+    peer->fd = fd;
+    atomic_init(&peer->references, 1);
+    atomic_init(&peer->jobs, 0);
+    int error = pthread_mutex_init(&peer->send_lock, NULL);
+    if (error) { free(peer); errno = error; return NULL; }
+    return peer;
+}
+static void control_peer_retain(struct control_peer *peer) {
+    atomic_fetch_add(&peer->references, 1);
+}
+static void control_peer_release(struct control_peer *peer) {
+    if (atomic_fetch_sub(&peer->references, 1) != 1) return;
+    close(peer->fd);
+    pthread_mutex_destroy(&peer->send_lock);
+    free(peer);
+}
 
-static int control_send(int fd, const void *payload, size_t len) {
-    pthread_mutex_lock(&control_send_lock);
-    int rc = np_npip_send(fd, payload, len);
-    pthread_mutex_unlock(&control_send_lock);
+static int control_send(struct control_peer *peer, const void *payload, size_t len) {
+    pthread_mutex_lock(&peer->send_lock);
+    int rc = np_npip_send(peer->fd, payload, len);
+    if (rc < 0) shutdown(peer->fd, SHUT_RDWR);
+    pthread_mutex_unlock(&peer->send_lock);
     return rc;
 }
 
@@ -898,7 +933,8 @@ static const char *preferred_login_shell(void) {
 /* Preserve a valid user choice, but repair cloud users that were created with
  * a distro-specific shell which is absent in the current root filesystem. */
 static int ensure_login_shell(const char *user) {
-    struct passwd *pw = getpwnam(user);
+    struct account_info account;
+    struct passwd *pw = lookup_user(user, &account);
     if (!pw) {
         errno = ENOENT;
         return -1;
@@ -924,8 +960,10 @@ static int ensure_login_shell(const char *user) {
 static int ensure_user(const char *user) {
     if (strcmp(user, "root") == 0)
         return 0;
-    if (getpwnam(user))
+    struct account_info account;
+    if (lookup_user(user, &account))
         return ensure_login_shell(user);
+    if (errno != ENOENT) return -1;
 
     const char *shell = preferred_login_shell();
     if (!shell) {
@@ -958,14 +996,17 @@ static int group_contains_user(const struct group *group, const char *user,
  * from a compiled bit-to-adapter mapping below, never directly from catalog
  * bytes. usermod is the portable primary path; addgroup covers BusyBox images. */
 static int add_user_to_existing_group(const char *user, const char *group_name) {
-    struct passwd *pw = getpwnam(user);
+    struct account_info account;
+    struct passwd *pw = lookup_user(user, &account);
     if (!pw) {
         errno = ENOENT;
         return -1;
     }
-    /* Copy the only passwd field used below before the next NSS lookup. */
     gid_t primary_gid = pw->pw_gid;
-    struct group *group = getgrnam(group_name);
+    struct group group_value, *group = NULL;
+    char group_text[16384];
+    int error = getgrnam_r(group_name, &group_value, group_text, sizeof(group_text), &group);
+    if (error) { errno = error; return -1; }
     if (!group)
         return 0;
     if (group_contains_user(group, user, primary_gid))
@@ -1062,6 +1103,23 @@ struct session_stack_install_context {
     struct np_session_stack_file_state file_state[NP_SESSION_STACK_ARTIFACT_COUNT];
 };
 
+static int compositor_has_runtime_probe(const char *path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat info;
+    const char marker[] = "NP_RUNTIME_PROBE:1";
+    int found = 0;
+    if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size >= (off_t)sizeof(marker)) {
+        void *bytes = mmap(NULL, (size_t)info.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (bytes != MAP_FAILED) {
+            found = memmem(bytes, (size_t)info.st_size, marker, sizeof(marker)) != NULL;
+            munmap(bytes, (size_t)info.st_size);
+        }
+    }
+    close(fd);
+    return found;
+}
+
 static int stage_session_artifact(
     void *opaque, const struct np_session_stack_artifact *artifact,
     size_t index) {
@@ -1081,6 +1139,17 @@ static int stage_session_artifact(
     int rc = np_agent_pull_file_mode_n(
         artifact->name, "", context->staging[index], artifact->mode,
         context->versions[index], sizeof(context->versions[index]), 8);
+    if (rc == 0 && (!strcmp(artifact->name, NP_COMPOSITOR_MUSL_NAME) ||
+                    !strcmp(artifact->name, NP_COMPOSITOR_GNU_NAME))) {
+        char *check[] = {context->staging[index], "--check-runtime", NULL};
+        if (!compositor_has_runtime_probe(context->staging[index])) {
+            logmsg("downloaded compositor is outdated: rebuild the matching NativePipe guest components");
+            errno = ENOEXEC; rc = -1;
+        } else if (np_run(check) != 0) {
+            logmsg("new compositor cannot load its runtime libraries; install the distribution's GLib/GIO, GdkPixbuf and librsvg packages before updating");
+            errno = ENOEXEC; rc = -1;
+        }
+    }
     if (rc != 0) {
         unlink(context->staging[index]);
         context->staging[index][0] = '\0';
@@ -1268,7 +1337,7 @@ static void *session_stack_thread(void *arg) {
 
 static int run_chpasswd(const char *user, const char *password) {
     int fds[2];
-    if (pipe(fds) < 0)
+    if (pipe2(fds, O_CLOEXEC) < 0)
         return -1;
     pid_t pid = fork();
     if (pid < 0) {
@@ -1278,6 +1347,7 @@ static int run_chpasswd(const char *user, const char *password) {
     }
     if (pid == 0) {
         close(fds[1]);
+        if (np_child_cloexec() < 0) _exit(126);
         if (dup2(fds[0], 0) < 0)
             _exit(127);
         close(fds[0]);
@@ -1304,15 +1374,16 @@ static int run_chpasswd(const char *user, const char *password) {
 static int set_user(const char *user, const char *old_user) {
     if (!valid_username(user))
         return -1;
+    struct account_info account;
     if (old_user && old_user[0]) {
         if (!valid_username(old_user))
             return -1;
-        if (getpwnam(user)) {
+        if (lookup_user(user, &account)) {
             errno = EEXIST;
             return -1;
         }
-        if (!getpwnam(old_user)) {
-            errno = ENOENT;
+        if (errno != ENOENT) return -1;
+        if (!lookup_user(old_user, &account)) {
             return -1;
         }
         char *ren[] = {"usermod", "-l", (char *)user, (char *)old_user, NULL};
@@ -1332,8 +1403,8 @@ static int set_user(const char *user, const char *old_user) {
 static int set_password(const char *user, const char *password) {
     if (!valid_username(user) || !password || strchr(password, '\n'))
         return -1;
-    if (!getpwnam(user) && strcmp(user, "root") != 0) {
-        errno = ENOENT;
+    struct account_info account;
+    if (!lookup_user(user, &account)) {
         return -1;
     }
     return run_chpasswd(user, password) == 0 ? 0 : -1;
@@ -1495,7 +1566,8 @@ static int apply_desktop_preferences_to_session(uint8_t color_scheme) {
     char user[64];
     if (read_cached_session_user(user, sizeof(user)) < 0)
         return 0;
-    struct passwd *pw = getpwnam(user);
+    struct account_info account;
+    struct passwd *pw = lookup_user(user, &account);
     struct session_environment env;
     if (!pw || pw->pw_uid == 0 || read_session_environment(pw->pw_uid, &env) < 0 ||
         !env.dbus[0])
@@ -1518,6 +1590,7 @@ static int apply_desktop_preferences_to_session(uint8_t color_scheme) {
         return -1;
     }
 
+    if (np_child_cloexec() < 0) _exit(126);
     char runtime[96];
     snprintf(runtime, sizeof(runtime), "/run/user/%u", (unsigned)pw->pw_uid);
     setenv("USER", pw->pw_name, 1);
@@ -1543,6 +1616,7 @@ static int apply_desktop_preferences_to_session(uint8_t color_scheme) {
 }
 
 static int enter_launch_context(const struct launch_req *r) {
+    if (np_child_cloexec() < 0) return -1;
     if (!r->username || !r->username[0]) {
         if (r->have_cwd && chdir(r->cwd) < 0)
             return -1;
@@ -1550,7 +1624,8 @@ static int enter_launch_context(const struct launch_req *r) {
         return 0;
     }
 
-    struct passwd *pw = getpwnam(r->username);
+    struct account_info account;
+    struct passwd *pw = lookup_user(r->username, &account);
     if (!pw || pw->pw_uid == 0)
         return -1;
 
@@ -1590,13 +1665,18 @@ static int enter_launch_context(const struct launch_req *r) {
 
 struct launch_reaper {
     pid_t pid;
-    int control_fd;
+    struct control_peer *peer;
+    uint64_t request_id;
 };
 
-static int send_process_exited(int fd, int32_t pid, int32_t status);
+static int send_process_exited(struct control_peer *peer, int32_t pid, int32_t status);
+static int send_launched(struct control_peer *peer, uint64_t id, int32_t pid);
 
 static void *reap_child_thread(void *arg) {
     struct launch_reaper *reaper = arg;
+    /* Keep launch acknowledgement before exit notification, even for an
+     * executable which exits immediately. The worker now owns child cleanup. */
+    (void)send_launched(reaper->peer, reaper->request_id, reaper->pid);
     int wait_status = 0;
     pid_t waited;
     do { waited = waitpid(reaper->pid, &wait_status, 0); }
@@ -1605,35 +1685,37 @@ static void *reap_child_thread(void *arg) {
         ? WEXITSTATUS(wait_status)
         : waited == reaper->pid && WIFSIGNALED(wait_status)
             ? 128 + WTERMSIG(wait_status) : 1;
-    (void)send_process_exited(reaper->control_fd, reaper->pid, status);
-    close(reaper->control_fd);
+    (void)send_process_exited(reaper->peer, reaper->pid, status);
+    control_peer_release(reaper->peer);
     free(reaper);
     return NULL;
 }
 
-static void reap_child_async(pid_t pid, int control_fd) {
+static int reap_child_async(pid_t pid, struct control_peer *peer, uint64_t request_id) {
     struct launch_reaper *reaper = calloc(1, sizeof(*reaper));
-    if (!reaper) return;
+    if (!reaper) return -1;
     reaper->pid = pid;
-    reaper->control_fd = fcntl(control_fd, F_DUPFD_CLOEXEC, 0);
-    if (reaper->control_fd < 0) {
-        free(reaper);
-        return;
-    }
+    reaper->peer = peer;
+    reaper->request_id = request_id;
+    control_peer_retain(peer);
     pthread_t thread;
-    if (pthread_create(&thread, NULL, reap_child_thread, reaper) == 0)
-        pthread_detach(thread);
-    else {
-        close(reaper->control_fd);
+    int error = pthread_create(&thread, NULL, reap_child_thread, reaper);
+    if (error) {
+        control_peer_release(reaper->peer);
         free(reaper);
+        errno = error;
+        return -1;
     }
+    pthread_detach(thread);
+    return 0;
 }
 
 static int launch_spec(const struct launch_req *r, int *pid_out) {
     if (!r->exe || !r->exe[0])
         return -1;
     if (r->username && r->username[0]) {
-        struct passwd *pw = getpwnam(r->username);
+        struct account_info account;
+        struct passwd *pw = lookup_user(r->username, &account);
         struct session_environment env;
         if (!pw || pw->pw_uid == 0 || read_session_environment(pw->pw_uid, &env) < 0) {
             errno = EAGAIN;
@@ -1701,64 +1783,80 @@ static int launch_spec(const struct launch_req *r, int *pid_out) {
     return 0;
 }
 
-static int read_pipe_pair(int out_fd, int err_fd,
-                          uint8_t **out, size_t *out_len, size_t out_cap,
-                          uint8_t **err, size_t *err_len, size_t err_cap) {
-    uint8_t *out_buf = malloc(out_cap + 1);
-    uint8_t *err_buf = malloc(err_cap + 1);
-    if (!out_buf || !err_buf) {
-        free(out_buf);
-        free(err_buf);
-        return -1;
-    }
-    size_t lengths[2] = {0, 0};
-    size_t caps[2] = {out_cap, err_cap};
-    uint8_t *buffers[2] = {out_buf, err_buf};
-    struct pollfd fds[2] = {
-        {.fd = out_fd, .events = POLLIN | POLLHUP},
-        {.fd = err_fd, .events = POLLIN | POLLHUP},
+static int read_pipe_pair(int peer_fd, int input_fd, const uint8_t *input, size_t input_len,
+                          int out_fd, int err_fd, uint8_t **out, size_t *out_len,
+                          uint8_t **err, size_t *err_len) {
+    size_t lengths[2] = {0, 0}, caps[2] = {0, 0};
+    const size_t limits[2] = {NP_MAX_READ, NP_MAX_STDERR};
+    uint8_t *buffers[2] = {NULL, NULL};
+    struct pollfd fds[4] = {
+        {.fd = out_fd, .events = POLLIN},
+        {.fd = err_fd, .events = POLLIN},
+        {.fd = input_fd, .events = POLLOUT},
+        {.fd = peer_fd, .events = 0},
     };
-    int live = 2;
-    uint8_t discard[8192];
-    while (live > 0) {
-        int rc = poll(fds, 2, -1);
-        if (rc < 0) {
-            if (errno == EINTR) continue;
-            free(out_buf); free(err_buf);
-            return -1;
+    int result = -1, live = 2;
+    size_t sent = 0;
+    if (input_fd >= 0 && fcntl(input_fd, F_SETFL, O_NONBLOCK) < 0) goto done;
+    while (live > 0 || fds[2].fd >= 0) {
+        int ready = poll(fds, 4, -1);
+        if (ready < 0) { if (errno == EINTR) continue; goto done; }
+        if (fds[3].revents & (POLLHUP | POLLERR | POLLNVAL)) { errno = ECANCELED; goto done; }
+        if (fds[2].fd >= 0 && fds[2].revents) {
+            ssize_t n = write(fds[2].fd, input + sent, input_len - sent);
+            if (n > 0) sent += (size_t)n;
+            else if (n < 0 && errno != EINTR && errno != EAGAIN && errno != EPIPE) goto done;
+            if (sent == input_len || (n < 0 && errno == EPIPE)) {
+                close(fds[2].fd); fds[2].fd = -1;
+            }
         }
         for (int i = 0; i < 2; i++) {
-            if (fds[i].fd < 0 || !(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
-            size_t remaining = caps[i] - lengths[i];
-            void *target = remaining ? buffers[i] + lengths[i] : discard;
-            size_t amount = remaining ? remaining : sizeof(discard);
-            ssize_t n = read(fds[i].fd, target, amount);
+            if (fds[i].fd < 0 || !fds[i].revents) continue;
+            uint8_t bytes[8192];
+            ssize_t n = read(fds[i].fd, bytes, sizeof(bytes));
             if (n > 0) {
-                if (remaining) lengths[i] += (size_t)n;
-                continue;
-            }
-            if (n < 0 && errno == EINTR) continue;
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-            close(fds[i].fd);
-            fds[i].fd = -1;
-            live--;
+                if ((size_t)n > limits[i] - lengths[i]) { errno = EFBIG; goto done; }
+                size_t needed = lengths[i] + (size_t)n + 1;
+                if (needed > caps[i]) {
+                    size_t cap = caps[i] ? caps[i] * 2 : sizeof(bytes) + 1;
+                    if (cap < needed) cap = needed;
+                    if (cap > limits[i] + 1) cap = limits[i] + 1;
+                    uint8_t *grown = realloc(buffers[i], cap);
+                    if (!grown) goto done;
+                    buffers[i] = grown; caps[i] = cap;
+                }
+                memcpy(buffers[i] + lengths[i], bytes, (size_t)n); lengths[i] += (size_t)n;
+            } else if (n == 0) {
+                close(fds[i].fd); fds[i].fd = -1; live--;
+            } else if (errno != EINTR && errno != EAGAIN) goto done;
         }
     }
-    out_buf[lengths[0]] = 0;
-    err_buf[lengths[1]] = 0;
-    *out = out_buf; *out_len = lengths[0];
-    *err = err_buf; *err_len = lengths[1];
-    return 0;
+    for (int i = 0; i < 2; i++) {
+        if (!buffers[i]) buffers[i] = malloc(1);
+        if (!buffers[i]) goto done;
+        buffers[i][lengths[i]] = 0;
+    }
+    *out = buffers[0]; *out_len = lengths[0];
+    *err = buffers[1]; *err_len = lengths[1];
+    result = 0;
+done:;
+    int saved = errno;
+    for (int i = 0; i < 3; i++) if (fds[i].fd >= 0) close(fds[i].fd);
+    if (result < 0) { free(buffers[0]); free(buffers[1]); }
+    errno = saved;
+    return result;
 }
 
-static int run_spec(const struct launch_req *r, int *status_out, uint8_t **stdout_b,
+static int run_spec(int peer_fd, const struct launch_req *r, int *status_out, uint8_t **stdout_b,
                     size_t *stdout_n, uint8_t **stderr_b, size_t *stderr_n) {
     if (!r->exe || !r->exe[0])
         return -1;
     int in_pipe[2] = {-1, -1}, out_pipe[2], err_pipe[2];
-    if (pipe(out_pipe) < 0 || pipe(err_pipe) < 0)
-        return -1;
-    if (r->stdin_len && pipe(in_pipe) < 0) {
+    if (pipe2(out_pipe, O_CLOEXEC) < 0) return -1;
+    if (pipe2(err_pipe, O_CLOEXEC) < 0) {
+        close(out_pipe[0]); close(out_pipe[1]); return -1;
+    }
+    if (r->stdin_len && pipe2(in_pipe, O_CLOEXEC) < 0) {
         close(out_pipe[0]);
         close(out_pipe[1]);
         close(err_pipe[0]);
@@ -1790,6 +1888,7 @@ static int run_spec(const struct launch_req *r, int *status_out, uint8_t **stdou
                 close(devnull);
             }
         }
+        if (setsid() < 0) _exit(127);
         close(out_pipe[0]);
         close(err_pipe[0]);
         dup2(out_pipe[1], 1);
@@ -1810,19 +1909,25 @@ static int run_spec(const struct launch_req *r, int *status_out, uint8_t **stdou
     close(err_pipe[1]);
     if (r->stdin_len) {
         close(in_pipe[0]);
-        np_write_full(in_pipe[1], r->stdin_data, r->stdin_len);
-        close(in_pipe[1]);
     }
 
     uint8_t *outb = NULL, *errb = NULL;
     size_t outn = 0, errn = 0;
-    if (read_pipe_pair(out_pipe[0], err_pipe[0], &outb, &outn, NP_MAX_READ,
-                       &errb, &errn, NP_MAX_STDERR) < 0) {
-        kill(pid, SIGTERM);
+    if (read_pipe_pair(peer_fd, in_pipe[1], r->stdin_data, r->stdin_len,
+                       out_pipe[0], err_pipe[0], &outb, &outn, &errb, &errn) < 0) {
+        int saved = errno; np_exec_cancel(pid); errno = saved; return -1;
     }
     int st = 0;
-    waitpid(pid, &st, 0);
-    *status_out = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    for (;;) {
+        pid_t waited = waitpid(pid, &st, WNOHANG);
+        if (waited == pid) break;
+        if (waited < 0 && errno != EINTR) { free(outb); free(errb); return -1; }
+        struct pollfd closed = {.fd = peer_fd, .events = 0};
+        if (poll(&closed, 1, 100) > 0) {
+            np_exec_cancel(pid); free(outb); free(errb); errno = ECANCELED; return -1;
+        }
+    }
+    *status_out = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 1;
     *stdout_b = outb ? outb : (uint8_t *)calloc(1, 1);
     *stdout_n = outb ? outn : 0;
     *stderr_b = errb ? errb : (uint8_t *)calloc(1, 1);
@@ -1831,189 +1936,45 @@ static int run_spec(const struct launch_req *r, int *status_out, uint8_t **stdou
 }
 
 struct exec_session {
-    int listen_fd;
-    int master_fd;
+    int listen_fd, master_fd, error_fd;
     pid_t pid;
     int terminal;
-    uint8_t input[64 * 1024];
-    size_t input_len;
 };
-
-static void apply_pty_winsize(int master_fd, uint32_t cols, uint32_t rows) {
-    struct winsize ws;
-    memset(&ws, 0, sizeof(ws));
-    ws.ws_col = cols ? (unsigned short)cols : 80;
-    ws.ws_row = rows ? (unsigned short)rows : 24;
-    if (ioctl(master_fd, TIOCSWINSZ, &ws) < 0)
-        logmsg("TIOCSWINSZ failed");
-}
-
-#define NP_EXEC_HEADER 12u
-#define NP_EXEC_DATA 1u
-#define NP_EXEC_RESIZE 2u
-#define NP_EXEC_EXIT 3u
-#define NP_EXEC_END_INPUT 4u
-#define NP_EXEC_MAX_PAYLOAD (1u << 20)
-
-static uint32_t read_le32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static int exec_send_frame(int fd, uint8_t kind, const void *payload, uint32_t length) {
-    uint8_t header[NP_EXEC_HEADER] = {'N', 'P', 'X', 'T', 1, kind, 0, 0};
-    header[8] = (uint8_t)length;
-    header[9] = (uint8_t)(length >> 8);
-    header[10] = (uint8_t)(length >> 16);
-    header[11] = (uint8_t)(length >> 24);
-    if (np_write_full(fd, header, sizeof(header)) < 0) return -1;
-    return length ? np_write_full(fd, payload, length) : 0;
-}
-
-static int exec_consume_input(struct exec_session *s, const uint8_t *bytes, size_t count) {
-    if (count > sizeof(s->input) - s->input_len) return -1;
-    memcpy(s->input + s->input_len, bytes, count);
-    s->input_len += count;
-    size_t off = 0;
-    while (s->input_len - off >= NP_EXEC_HEADER) {
-        const uint8_t *frame = s->input + off;
-        if (memcmp(frame, "NPXT", 4) != 0 || frame[4] != 1) return -1;
-        uint32_t length = read_le32(frame + 8);
-        if (length > NP_EXEC_MAX_PAYLOAD) return -1;
-        size_t total = NP_EXEC_HEADER + (size_t)length;
-        if (s->input_len - off < total) break;
-        const uint8_t *payload = frame + NP_EXEC_HEADER;
-        if (frame[5] == NP_EXEC_DATA) {
-            if (np_write_full(s->master_fd, payload, length) < 0) return -1;
-        } else if (frame[5] == NP_EXEC_RESIZE && length == 8) {
-            apply_pty_winsize(s->master_fd, read_le32(payload), read_le32(payload + 4));
-        } else if (frame[5] == NP_EXEC_END_INPUT && length == 0) {
-            if (s->terminal) {
-                struct termios attrs;
-                unsigned char eof = 4;
-                if (tcgetattr(s->master_fd, &attrs) == 0 &&
-                    attrs.c_cc[VEOF] != _POSIX_VDISABLE)
-                    eof = attrs.c_cc[VEOF];
-                if (np_write_full(s->master_fd, &eof, 1) < 0) return -1;
-            } else if (shutdown(s->master_fd, SHUT_WR) < 0 && errno != ENOTCONN) {
-                return -1;
-            }
-        } else if (frame[5] != NP_EXEC_EXIT) {
-            return -1;
-        }
-        off += total;
-    }
-    if (off) {
-        memmove(s->input, s->input + off, s->input_len - off);
-        s->input_len -= off;
-    }
-    return 0;
-}
 
 static void *exec_session_thread(void *arg) {
     struct exec_session *s = arg;
-    if (!s)
-        return NULL;
     int sock = -1;
+    struct timespec started; clock_gettime(CLOCK_MONOTONIC, &started);
     for (;;) {
-        struct sockaddr_storage ss;
-        socklen_t sl = sizeof(ss);
-        sock = accept4(s->listen_fd, (struct sockaddr *)&ss, &sl, SOCK_CLOEXEC);
-        if (sock < 0) {
-            if (errno == EINTR)
-                continue;
-            logmsg("exec accept failed");
-            break;
-        }
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+        int elapsed = (int)((now.tv_sec - started.tv_sec) * 1000 +
+                           (now.tv_nsec - started.tv_nsec) / 1000000);
+        if (elapsed >= 30000) break;
+        struct pollfd p = {.fd = s->listen_fd, .events = POLLIN};
+        int ready = poll(&p, 1, 30000 - elapsed);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0 || !(p.revents & POLLIN)) break;
+        sock = accept4(s->listen_fd, NULL, NULL, SOCK_CLOEXEC);
+        if (sock < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
+        if (!np_vsock_peer_is_host(sock)) { close(sock); sock = -1; continue; }
         break;
     }
     close(s->listen_fd);
-    s->listen_fd = -1;
-    if (sock < 0) {
+    if (sock >= 0) {
+        int result = np_exec_stream(sock, s->master_fd, s->error_fd, s->pid, s->terminal);
+        if (result == 0) {
+            /* Retain the VZ stream until the peer consumes the exit frame. */
+            shutdown(sock, SHUT_WR);
+            struct pollfd p = {.fd = sock, .events = POLLIN};
+            char bytes[8192];
+            while (poll(&p, 1, 5000) > 0 && read(sock, bytes, sizeof(bytes)) > 0) {}
+        }
+        shutdown(sock, SHUT_RDWR); close(sock);
+    } else {
         close(s->master_fd);
-        free(s);
-        return NULL;
+        if (s->error_fd >= 0) close(s->error_fd);
+        np_exec_cancel(s->pid);
     }
-    logmsg("exec vsock connected");
-
-    uint8_t buf[8192];
-    for (;;) {
-        struct pollfd pfds[2];
-        pfds[0].fd = sock;
-        pfds[0].events = POLLIN;
-        pfds[0].revents = 0;
-        pfds[1].fd = s->master_fd;
-        pfds[1].events = POLLIN;
-        pfds[1].revents = 0;
-        int pr = poll(pfds, 2, -1);
-        if (pr < 0) {
-            if (errno == EINTR)
-                continue;
-            break;
-        }
-        if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL))
-            break;
-        if (pfds[0].revents & POLLIN) {
-            ssize_t n = read(sock, buf, sizeof(buf));
-            if (n < 0) {
-                if (errno == EINTR)
-                    continue;
-                break;
-            }
-            if (n == 0)
-                break;
-            if (exec_consume_input(s, buf, (size_t)n) < 0)
-                break;
-        }
-        if (pfds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            /* POLLIN and POLLHUP commonly arrive together. The child may have
-             * much more than one 8 KiB block buffered at exit, so drain until
-             * the PTY/socket reports the actual EOF before sending status. */
-            for (;;) {
-                ssize_t n = read(s->master_fd, buf, sizeof(buf));
-                if (n > 0) {
-                    if (exec_send_frame(sock, NP_EXEC_DATA, buf, (uint32_t)n) < 0)
-                        break;
-                    continue;
-                }
-                if (n < 0 && errno == EINTR)
-                    continue;
-                break;
-            }
-            break;
-        }
-        if (pfds[1].revents & POLLIN) {
-            ssize_t n = read(s->master_fd, buf, sizeof(buf));
-            if (n < 0) {
-                if (errno == EINTR)
-                    continue;
-                break;
-            }
-            if (n == 0)
-                break;
-            if (exec_send_frame(sock, NP_EXEC_DATA, buf, (uint32_t)n) < 0)
-                break;
-        }
-    }
-    int wait_status = 0;
-    pid_t waited;
-    do {
-        waited = waitpid(s->pid, &wait_status, 0);
-    } while (waited < 0 && errno == EINTR);
-    int32_t exit_status = 1;
-    if (waited >= 0 && WIFEXITED(wait_status))
-        exit_status = WEXITSTATUS(wait_status);
-    else if (waited >= 0 && WIFSIGNALED(wait_status))
-        exit_status = 128 + WTERMSIG(wait_status);
-    uint8_t exit_payload[4] = {
-        (uint8_t)exit_status,
-        (uint8_t)(exit_status >> 8),
-        (uint8_t)(exit_status >> 16),
-        (uint8_t)(exit_status >> 24),
-    };
-    exec_send_frame(sock, NP_EXEC_EXIT, exit_payload, sizeof(exit_payload));
-    close(sock);
-    close(s->master_fd);
     free(s);
     return NULL;
 }
@@ -2028,11 +1989,12 @@ static int listen_exec_port(uint32_t *port_out) {
         if (next_exec_port > NP_PORT_SESSION_LAST)
             next_exec_port = NP_PORT_SESSION_FIRST;
         int fd = np_vsock_listen(port, 1);
-        if (fd >= 0) {
+        if (fd >= 0 && fcntl(fd, F_SETFL, O_NONBLOCK) == 0) {
             *port_out = port;
             pthread_mutex_unlock(&exec_port_lock);
             return fd;
         }
+        if (fd >= 0) close(fd);
     }
     pthread_mutex_unlock(&exec_port_lock);
     return -1;
@@ -2049,7 +2011,7 @@ static int exec_spec(const struct launch_req *r, uint32_t cols, uint32_t rows,
     ws.ws_col = cols ? (unsigned short)cols : 80;
     ws.ws_row = rows ? (unsigned short)rows : 24;
 
-    int master = -1, slave = -1;
+    int master = -1, slave = -1, errors[2] = {-1, -1};
     if (terminal) {
         if (openpty(&master, &slave, NULL, NULL, &ws) < 0)
             return -1;
@@ -2059,28 +2021,43 @@ static int exec_spec(const struct launch_req *r, uint32_t cols, uint32_t rows,
             return -1;
         master = pair[0];
         slave = pair[1];
+        if (pipe2(errors, O_CLOEXEC) < 0) { close(master); close(slave); return -1; }
+    }
+    fcntl(master, F_SETFD, FD_CLOEXEC); fcntl(slave, F_SETFD, FD_CLOEXEC);
+
+    /* Allocate the endpoint before spawning; failure cannot leave an orphan. */
+    int listen_fd = listen_exec_port(port_out);
+    if (listen_fd < 0) {
+        close(master); close(slave);
+        if (errors[0] >= 0) { close(errors[0]); close(errors[1]); }
+        return -1;
     }
 
     pid_t pid = fork();
     if (pid < 0) {
+        close(listen_fd);
+        if (errors[0] >= 0) { close(errors[0]); close(errors[1]); }
         close(master);
         close(slave);
         return -1;
     }
     if (pid == 0) {
+        close(listen_fd);
+        if (errors[0] >= 0) close(errors[0]);
         close(master);
+        if (setsid() < 0) _exit(127);
         if (terminal) {
             /* Equivalent to login_tty(slave): new session, controlling tty, stdio. */
-            if (setsid() < 0)
-                _exit(127);
             if (ioctl(slave, TIOCSCTTY, 0) < 0) {
                 /* Non-fatal on some kernels if already controlling. */
             }
         }
-        if (dup2(slave, 0) < 0 || dup2(slave, 1) < 0 || dup2(slave, 2) < 0)
+        if (dup2(slave, 0) < 0 || dup2(slave, 1) < 0 ||
+            dup2(terminal ? slave : errors[1], 2) < 0)
             _exit(127);
         if (slave > 2)
             close(slave);
+        if (errors[1] > 2) close(errors[1]);
         if (enter_launch_context(r) < 0)
             _exit(126);
         char *argv[NP_MAX_ARGS + 2];
@@ -2092,33 +2069,32 @@ static int exec_spec(const struct launch_req *r, uint32_t cols, uint32_t rows,
         _exit(127);
     }
     close(slave);
-
-    /* Listen before NPXS so the host can connect as soon as it gets the reply. */
-    int listen_fd = listen_exec_port(port_out);
-    if (listen_fd < 0) {
-        kill(pid, SIGTERM);
-        close(master);
-        return -1;
-    }
+    if (errors[1] >= 0) close(errors[1]);
 
     struct exec_session *sess = malloc(sizeof(*sess));
     if (!sess) {
-        kill(pid, SIGTERM);
+        int error = errno;
+        np_exec_cancel(pid);
         close(listen_fd);
         close(master);
+        if (errors[0] >= 0) close(errors[0]);
+        errno = error;
         return -1;
     }
     sess->listen_fd = listen_fd;
     sess->master_fd = master;
+    sess->error_fd = errors[0];
     sess->pid = pid;
     sess->terminal = terminal;
-    sess->input_len = 0;
     pthread_t th;
-    if (pthread_create(&th, NULL, exec_session_thread, sess) != 0) {
-        kill(pid, SIGTERM);
+    int error = pthread_create(&th, NULL, exec_session_thread, sess);
+    if (error != 0) {
+        np_exec_cancel(pid);
         close(listen_fd);
         close(master);
+        if (errors[0] >= 0) close(errors[0]);
         free(sess);
+        errno = error;
         return -1;
     }
     pthread_detach(th);
@@ -2163,9 +2139,6 @@ static void wr_u64(uint8_t *p, uint64_t v) {
     wr_u32(p + 4, (uint32_t)(v >> 32));
 }
 
-static void wr_i64(uint8_t *p, int64_t v) {
-    wr_u64(p, (uint64_t)v);
-}
 
 static int rd_u16(const uint8_t *p, size_t n, size_t *off, uint16_t *out) {
     if (*off + 2 > n)
@@ -2186,7 +2159,7 @@ static int rd_u64(const uint8_t *p, size_t n, size_t *off, uint64_t *out) {
     return 0;
 }
 
-static int send_bin_error(int fd, uint64_t id, uint32_t code, const char *msg) {
+static int send_bin_error(struct control_peer *peer, uint64_t id, uint32_t code, const char *msg) {
     size_t mlen = msg ? strlen(msg) : 0;
     if (mlen > 65535)
         mlen = 65535;
@@ -2200,407 +2173,11 @@ static int send_bin_error(int fd, uint64_t id, uint32_t code, const char *msg) {
     wr_u16(buf + 16, (uint16_t)mlen);
     if (mlen)
         memcpy(buf + 18, msg, mlen);
-    int rc = control_send(fd, buf, n);
+    int rc = control_send(peer, buf, n);
     free(buf);
     return rc;
 }
 
-static int send_file_bytes(int fd, uint64_t id, const char *path, const uint8_t *data,
-                           uint64_t size) {
-    size_t plen = strlen(path);
-    if (plen > 65535)
-        plen = 65535;
-    size_t n = 4 + 8 + 2 + plen + 8 + (size_t)size;
-    if (n > NP_MAX_NPIP_PAYLOAD)
-        return send_bin_error(fd, id, 27, "file too large");
-    uint8_t *buf = malloc(n);
-    if (!buf)
-        return -1;
-    uint8_t *p = buf;
-    memcpy(p, "NPFL", 4);
-    p += 4;
-    wr_u64(p, id);
-    p += 8;
-    wr_u16(p, (uint16_t)plen);
-    p += 2;
-    memcpy(p, path, plen);
-    p += plen;
-    wr_u64(p, size);
-    p += 8;
-    if (size)
-        memcpy(p, data, (size_t)size);
-    int rc = control_send(fd, buf, n);
-    free(buf);
-    return rc;
-}
-
-static int send_dir_list(int fd, uint64_t id, const char *path, const uint8_t *entries,
-                         size_t entries_len, uint32_t count, uint32_t flags) {
-    size_t plen = strlen(path);
-    if (plen > 65535)
-        plen = 65535;
-    size_t n = 4 + 8 + 2 + plen + 4 + 4 + entries_len;
-    if (n > NP_MAX_NPIP_PAYLOAD)
-        return send_bin_error(fd, id, 27, "listing too large");
-    uint8_t *buf = malloc(n);
-    if (!buf)
-        return -1;
-    uint8_t *p = buf;
-    memcpy(p, "NPLS", 4);
-    p += 4;
-    wr_u64(p, id);
-    p += 8;
-    wr_u16(p, (uint16_t)plen);
-    p += 2;
-    memcpy(p, path, plen);
-    p += plen;
-    wr_u32(p, flags);
-    p += 4;
-    wr_u32(p, count);
-    p += 4;
-    if (entries_len)
-        memcpy(p, entries, entries_len);
-    int rc = control_send(fd, buf, n);
-    free(buf);
-    return rc;
-}
-
-struct list_hold {
-    char *name;
-    size_t len;
-    size_t off;
-    uint8_t dtype;
-    int continues;
-    int valid;
-};
-
-struct list_sess {
-    int active;
-    uint64_t id;
-    DIR *dir;
-    char path[4096];
-    struct list_hold hold;
-};
-
-static void hold_clear(struct list_hold *h) {
-    if (!h)
-        return;
-    free(h->name);
-    memset(h, 0, sizeof(*h));
-}
-
-static int hold_set(struct list_hold *h, const char *name, size_t len, size_t off,
-                    uint8_t dtype, int continues) {
-    hold_clear(h);
-    h->name = malloc(len + 1);
-    if (!h->name)
-        return -1;
-    memcpy(h->name, name, len);
-    h->name[len] = '\0';
-    h->len = len;
-    h->off = off;
-    h->dtype = dtype;
-    h->continues = continues;
-    h->valid = 1;
-    return 0;
-}
-
-static void list_sess_close(struct list_sess *s) {
-    if (!s)
-        return;
-    if (s->dir)
-        closedir(s->dir);
-    hold_clear(&s->hold);
-    s->dir = NULL;
-    s->active = 0;
-    s->id = 0;
-}
-
-static int list_append(uint8_t **buf, size_t *len, size_t *cap, uint32_t *count,
-                       size_t *name_bytes, uint8_t dtype, uint8_t eflags, const char *name,
-                       size_t nlen) {
-    if (nlen == 0 || nlen > 65535)
-        return 0;
-    size_t need = 1 + 1 + 2 + nlen;
-    if (*len + need > *cap) {
-        size_t ncap = *cap ? *cap * 2 : 4096;
-        while (ncap < *len + need)
-            ncap *= 2;
-        uint8_t *grown = realloc(*buf, ncap);
-        if (!grown)
-            return -1;
-        *buf = grown;
-        *cap = ncap;
-    }
-    uint8_t *p = *buf + *len;
-    p[0] = dtype;
-    p[1] = eflags;
-    wr_u16(p + 2, (uint16_t)nlen);
-    memcpy(p + 4, name, nlen);
-    *len += need;
-    *name_bytes += nlen;
-    (*count)++;
-    return 0;
-}
-
-/* Emit as much of s->hold as fits. Returns 1 if the chunk should stop.
- * Splits between names when possible; only cuts inside a name if that name
- * itself exceeds the remaining budget (or the u16 name_len limit). */
-static int emit_hold(struct list_sess *s, uint8_t **buf, size_t *len, size_t *cap,
-                     uint32_t *count, size_t *name_bytes, int *has_more,
-                     int *split_in_name) {
-    struct list_hold *h = &s->hold;
-    if (!h->valid)
-        return 0;
-    size_t remain = h->len - h->off;
-    if (remain == 0) {
-        hold_clear(h);
-        return 0;
-    }
-    size_t room = (*name_bytes < NP_LIST_NAME_BUDGET)
-                      ? (NP_LIST_NAME_BUDGET - *name_bytes)
-                      : 0;
-    int mid_name = h->continues || h->off > 0;
-    if (!mid_name && *count > 0 && remain > room) {
-        *has_more = 1;
-        *split_in_name = 0;
-        return 1;
-    }
-    if (room == 0) {
-        *has_more = 1;
-        *split_in_name = mid_name;
-        return 1;
-    }
-    size_t take = remain;
-    if (take > room)
-        take = room;
-    if (take > 65535)
-        take = 65535;
-    int incomplete = take < remain;
-    uint8_t eflags = 0;
-    if (mid_name)
-        eflags |= NP_ENTRY_CONT;
-    if (incomplete)
-        eflags |= NP_ENTRY_INCOMPLETE;
-    if (list_append(buf, len, cap, count, name_bytes, h->dtype, eflags, h->name + h->off,
-                    take) < 0)
-        return -1;
-    h->off += take;
-    h->continues = 1;
-    if (incomplete) {
-        *has_more = 1;
-        *split_in_name = 1;
-        return 1;
-    }
-    hold_clear(h);
-    return 0;
-}
-
-static int fill_list_chunk(struct list_sess *s, uint8_t **out, size_t *out_len,
-                           uint32_t *count, int *has_more, int *split_in_name) {
-    *has_more = 0;
-    *split_in_name = 0;
-    *count = 0;
-    *out_len = 0;
-    size_t cap = 4096, len = 0, name_bytes = 0;
-    uint8_t *buf = malloc(cap);
-    if (!buf)
-        return -1;
-
-    int stop = emit_hold(s, &buf, &len, &cap, count, &name_bytes, has_more, split_in_name);
-    if (stop < 0) {
-        free(buf);
-        return -1;
-    }
-    if (stop) {
-        *out = buf;
-        *out_len = len;
-        return 0;
-    }
-
-    struct dirent *ent;
-    while ((ent = readdir(s->dir))) {
-        if (ent->d_name[0] == '.' &&
-            (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
-            continue;
-        size_t nlen = strlen(ent->d_name);
-        if (nlen == 0)
-            continue;
-        if (hold_set(&s->hold, ent->d_name, nlen, 0, (uint8_t)ent->d_type, 0) < 0) {
-            free(buf);
-            return -1;
-        }
-        stop = emit_hold(s, &buf, &len, &cap, count, &name_bytes, has_more, split_in_name);
-        if (stop < 0) {
-            free(buf);
-            return -1;
-        }
-        if (stop) {
-            *out = buf;
-            *out_len = len;
-            return 0;
-        }
-    }
-    *out = buf;
-    *out_len = len;
-    return 0;
-}
-
-static int send_list_chunk(int fd, struct list_sess *s) {
-    uint8_t *entries = NULL;
-    size_t elen = 0;
-    uint32_t count = 0;
-    int has_more = 0, split_in_name = 0;
-    if (fill_list_chunk(s, &entries, &elen, &count, &has_more, &split_in_name) < 0) {
-        uint64_t id = s->id;
-        int e = errno ? errno : 1;
-        list_sess_close(s);
-        return send_bin_error(fd, id, (uint32_t)e, strerror(e));
-    }
-    uint32_t flags = 0;
-    if (has_more)
-        flags |= NP_LIST_HAS_MORE;
-    if (split_in_name)
-        flags |= NP_LIST_NAME_TRUNC;
-    int rc = send_dir_list(fd, s->id, s->path, entries, elen, count, flags);
-    free(entries);
-    if (!has_more)
-        list_sess_close(s);
-    return rc;
-}
-
-/* procfs and sysfs expose regular files whose stat size is zero even though a
- * read returns data.  Read every regular file to EOF under the protocol limit
- * instead of treating st_size as the payload length. */
-static int read_regular_file(const char *path, size_t size_hint,
-                             uint8_t **out, size_t *out_size) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return -1;
-
-    size_t capacity = size_hint ? size_hint : 4096;
-    if (capacity > NP_MAX_READ)
-        capacity = NP_MAX_READ;
-    uint8_t *data = malloc(capacity ? capacity : 1);
-    if (!data) {
-        close(fd);
-        errno = ENOMEM;
-        return -1;
-    }
-
-    size_t size = 0;
-    for (;;) {
-        if (size == capacity) {
-            if (capacity == NP_MAX_READ) {
-                uint8_t extra;
-                ssize_t n;
-                do {
-                    n = read(fd, &extra, 1);
-                } while (n < 0 && errno == EINTR);
-                if (n > 0) errno = EFBIG;
-                if (n != 0) goto fail;
-                break;
-            }
-            size_t next = capacity > NP_MAX_READ / 2
-                ? NP_MAX_READ : capacity * 2;
-            uint8_t *grown = realloc(data, next);
-            if (!grown) {
-                errno = ENOMEM;
-                goto fail;
-            }
-            data = grown;
-            capacity = next;
-        }
-
-        ssize_t n = read(fd, data + size, capacity - size);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            goto fail;
-        }
-        if (n == 0) break;
-        size += (size_t)n;
-    }
-
-    close(fd);
-    *out = data;
-    *out_size = size;
-    return 0;
-
-fail: {
-        int saved = errno ? errno : EIO;
-        close(fd);
-        free(data);
-        errno = saved;
-        return -1;
-    }
-}
-
-static int handle_read_path(int fd, const uint8_t *payload, size_t n, struct list_sess *sess) {
-    size_t off = 4;
-    uint64_t id = 0;
-    uint16_t plen = 0;
-    if (rd_u64(payload, n, &off, &id) < 0 || rd_u16(payload, n, &off, &plen) < 0)
-        return -1;
-    if (off + plen > n || plen == 0 || plen >= 4096)
-        return send_bin_error(fd, id, 22, "bad path");
-    char path[4096];
-    memcpy(path, payload + off, plen);
-    path[plen] = '\0';
-    if (path[0] != '/')
-        return send_bin_error(fd, id, 22, "path must be absolute");
-
-    list_sess_close(sess);
-
-    struct stat st;
-    if (stat(path, &st) < 0)
-        return send_bin_error(fd, id, (uint32_t)errno, strerror(errno));
-
-    if (S_ISDIR(st.st_mode)) {
-        DIR *dir = opendir(path);
-        if (!dir)
-            return send_bin_error(fd, id, (uint32_t)errno, strerror(errno));
-        sess->active = 1;
-        sess->id = id;
-        sess->dir = dir;
-        snprintf(sess->path, sizeof(sess->path), "%s", path);
-        return send_list_chunk(fd, sess);
-    }
-    if (!S_ISREG(st.st_mode))
-        return send_bin_error(fd, id, 22, "not a file or directory");
-    if ((uint64_t)st.st_size > NP_MAX_READ)
-        return send_bin_error(fd, id, 27, "file too large");
-
-    size_t size = 0;
-    uint8_t *data = NULL;
-    if (read_regular_file(path, (size_t)st.st_size, &data, &size) < 0) {
-        int e = errno ? errno : EIO;
-        return send_bin_error(fd, id, (uint32_t)e, strerror(e));
-    }
-    int rc = send_file_bytes(fd, id, path, data, size);
-    free(data);
-    return rc;
-}
-
-static int handle_list_continue(int fd, const uint8_t *payload, size_t n,
-                                struct list_sess *sess) {
-    size_t off = 4;
-    uint64_t id = 0;
-    if (rd_u64(payload, n, &off, &id) < 0)
-        return -1;
-    if (!sess->active || sess->id != id || !sess->dir)
-        return send_bin_error(fd, id, 2, "no listing in progress");
-    return send_list_chunk(fd, sess);
-}
-
-static int handle_list_cancel(const uint8_t *payload, size_t n, struct list_sess *sess) {
-    size_t off = 4;
-    uint64_t id = 0;
-    if (rd_u64(payload, n, &off, &id) < 0)
-        return -1;
-    if (sess->active && sess->id == id)
-        list_sess_close(sess);
-    return 0;
-}
 
 static int rd_u32(const uint8_t *p, size_t n, size_t *off, uint32_t *out) {
     if (*off + 4 > n)
@@ -2699,21 +2276,27 @@ static int parse_launch_req(const uint8_t *p, size_t n, size_t *off, struct laun
     return *off == n ? 0 : -1;
 }
 
+/* Keep the conditional display capability last. Size and encoder must use
+ * the same list; adding a capability must not hide an unrelated one. */
+static const char *const guest_capabilities[] = {
+    "console.resize", "process.launch", "process.run", "process.exec",
+    "fs.read", "fs.stat", "fs.write", "fs.stream.v1", "account.credentials",
+    "agent.version", "environment.catalog", "resource.sync.v1",
+    "integration.desktop-preferences", "fs.shared-folders", "display.wayland",
+};
+static size_t guest_capability_count(const struct guest_info *gi) {
+    return sizeof(guest_capabilities) / sizeof(guest_capabilities[0]) - !gi->have_wayland;
+}
+
 static size_t guest_info_encoded_size(const struct guest_info *gi) {
     const char *fields[] = {gi->agent_version, gi->kernel_release, gi->distro_name,
                             gi->distro_version, gi->init_system};
-    const char *caps[] = {
-        "console.resize", "process.launch", "process.run", "process.exec", "fs.read", "fs.stat", "fs.write",
-        "account.credentials", "agent.version", "environment.catalog", "resource.sync.v1",
-        "integration.desktop-preferences", "fs.shared-folders",
-        "display.wayland",
-    };
-    int ncap = gi->have_wayland ? 14 : 13;
+    size_t ncap = guest_capability_count(gi);
     size_t n = 2;
     for (int i = 0; i < 5; i++)
         n += 2 + strlen(fields[i]);
-    for (int i = 0; i < ncap; i++)
-        n += 2 + strlen(caps[i]);
+    for (size_t i = 0; i < ncap; i++)
+        n += 2 + strlen(guest_capabilities[i]);
     char revision[32];
     snprintf(revision, sizeof(revision), "%llu",
              (unsigned long long)gi->environment_revision);
@@ -2726,13 +2309,7 @@ static size_t guest_info_encoded_size(const struct guest_info *gi) {
 static size_t encode_guest_info(uint8_t *p, const struct guest_info *gi) {
     const char *fields[] = {gi->agent_version, gi->kernel_release, gi->distro_name,
                             gi->distro_version, gi->init_system};
-    const char *caps[] = {
-        "console.resize", "process.launch", "process.run", "process.exec", "fs.read", "fs.stat", "fs.write",
-        "account.credentials", "agent.version", "environment.catalog", "resource.sync.v1",
-        "integration.desktop-preferences", "fs.shared-folders",
-        "display.wayland",
-    };
-    int ncap = gi->have_wayland ? 14 : 13;
+    size_t ncap = guest_capability_count(gi);
     uint8_t *start = p;
     for (int i = 0; i < 5; i++) {
         size_t len = strlen(fields[i]);
@@ -2745,11 +2322,11 @@ static size_t encode_guest_info(uint8_t *p, const struct guest_info *gi) {
     }
     wr_u16(p, (uint16_t)ncap);
     p += 2;
-    for (int i = 0; i < ncap; i++) {
-        size_t len = strlen(caps[i]);
+    for (size_t i = 0; i < ncap; i++) {
+        size_t len = strlen(guest_capabilities[i]);
         wr_u16(p, (uint16_t)len);
         p += 2;
-        memcpy(p, caps[i], len);
+        memcpy(p, guest_capabilities[i], len);
         p += len;
     }
     const char *environment_fields[] = {
@@ -2769,33 +2346,33 @@ static size_t encode_guest_info(uint8_t *p, const struct guest_info *gi) {
     return (size_t)(p - start);
 }
 
-static int send_ok(int fd, uint64_t id) {
+static int send_ok(struct control_peer *peer, uint64_t id) {
     uint8_t buf[12];
     memcpy(buf, "NPOK", 4);
     wr_u64(buf + 4, id);
-    return control_send(fd, buf, sizeof(buf));
+    return control_send(peer, buf, sizeof(buf));
 }
 
-static int handle_desktop_preferences(int fd, const uint8_t *payload, size_t n) {
+static int handle_desktop_preferences(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0 || off + 1 != n)
-        return send_bin_error(fd, id, 22, "bad desktop preferences");
+        return send_bin_error(peer, id, 22, "bad desktop preferences");
     uint8_t color_scheme = payload[off];
     if (color_scheme != 1 && color_scheme != 2)
-        return send_bin_error(fd, id, 22, "bad color scheme");
+        return send_bin_error(peer, id, 22, "bad color scheme");
     const char *text = color_scheme == 2
         ? "color-scheme=dark\n" : "color-scheme=light\n";
     if (np_write_file(NP_DESKTOP_PREFERENCES_FILE, text, strlen(text), 0644) < 0)
-        return send_bin_error(fd, id, (uint32_t)(errno ? errno : EIO),
+        return send_bin_error(peer, id, (uint32_t)(errno ? errno : EIO),
                               "cannot persist desktop preferences");
     if (apply_desktop_preferences_to_session(color_scheme) < 0)
-        return send_bin_error(fd, id, (uint32_t)(errno ? errno : EIO),
+        return send_bin_error(peer, id, (uint32_t)(errno ? errno : EIO),
                               "cannot apply desktop preferences to the running session");
-    return send_ok(fd, id);
+    return send_ok(peer, id);
 }
 
-static int send_info(int fd, uint64_t id, const struct guest_info *gi) {
+static int send_info(struct control_peer *peer, uint64_t id, const struct guest_info *gi) {
     size_t info_n = guest_info_encoded_size(gi);
     size_t n = 4 + 8 + info_n;
     uint8_t *buf = malloc(n);
@@ -2804,12 +2381,12 @@ static int send_info(int fd, uint64_t id, const struct guest_info *gi) {
     memcpy(buf, "NPIF", 4);
     wr_u64(buf + 4, id);
     encode_guest_info(buf + 12, gi);
-    int rc = control_send(fd, buf, n);
+    int rc = control_send(peer, buf, n);
     free(buf);
     return rc;
 }
 
-static int send_runtime_ready(int fd, const struct guest_info *gi) {
+static int send_runtime_ready(struct control_peer *peer, const struct guest_info *gi) {
     size_t info_n = guest_info_encoded_size(gi);
     size_t n = 4 + info_n;
     uint8_t *buf = malloc(n);
@@ -2817,43 +2394,43 @@ static int send_runtime_ready(int fd, const struct guest_info *gi) {
         return -1;
     memcpy(buf, "NPRT", 4);
     encode_guest_info(buf + 4, gi);
-    int rc = control_send(fd, buf, n);
+    int rc = control_send(peer, buf, n);
     free(buf);
     return rc;
 }
 
-static int send_launched(int fd, uint64_t id, int32_t pid) {
+static int send_launched(struct control_peer *peer, uint64_t id, int32_t pid) {
     uint8_t buf[16];
     memcpy(buf, "NPLP", 4);
     wr_u64(buf + 4, id);
     wr_u32(buf + 12, (uint32_t)pid);
-    return control_send(fd, buf, sizeof(buf));
+    return control_send(peer, buf, sizeof(buf));
 }
 
-static int send_process_exited(int fd, int32_t pid, int32_t status) {
+static int send_process_exited(struct control_peer *peer, int32_t pid, int32_t status) {
     uint8_t buf[12];
     memcpy(buf, "NPEX", 4);
     wr_u32(buf + 4, (uint32_t)pid);
     wr_u32(buf + 8, (uint32_t)status);
-    return control_send(fd, buf, sizeof(buf));
+    return control_send(peer, buf, sizeof(buf));
 }
 
-static int send_exec_session(int fd, uint64_t id, int32_t pid, uint32_t port) {
+static int send_exec_session(struct control_peer *peer, uint64_t id, int32_t pid, uint32_t port) {
     uint8_t buf[20];
     memcpy(buf, "NPXS", 4);
     wr_u64(buf + 4, id);
     wr_u32(buf + 12, (uint32_t)pid);
     wr_u32(buf + 16, port);
-    return control_send(fd, buf, sizeof(buf));
+    return control_send(peer, buf, sizeof(buf));
 }
 
-static int send_ran(int fd, uint64_t id, int32_t status, const uint8_t *out, size_t out_n,
+static int send_ran(struct control_peer *peer, uint64_t id, int32_t status, const uint8_t *out, size_t out_n,
                     const uint8_t *err, size_t err_n) {
     if (out_n > 0xffffffffu || err_n > 0xffffffffu)
-        return send_bin_error(fd, id, 27, "output too large");
+        return send_bin_error(peer, id, 27, "output too large");
     size_t n = 4 + 8 + 4 + 4 + out_n + 4 + err_n;
     if (n > NP_MAX_NPIP_PAYLOAD)
-        return send_bin_error(fd, id, 27, "output too large");
+        return send_bin_error(peer, id, 27, "output too large");
     uint8_t *buf = malloc(n);
     if (!buf)
         return -1;
@@ -2873,65 +2450,35 @@ static int send_ran(int fd, uint64_t id, int32_t status, const uint8_t *out, siz
     p += 4;
     if (err_n)
         memcpy(p, err, err_n);
-    int rc = control_send(fd, buf, n);
+    int rc = control_send(peer, buf, n);
     free(buf);
     return rc;
 }
 
-static int send_path_stat(int fd, uint64_t id, const char *path, const struct stat *st) {
-    size_t plen = strlen(path);
-    if (plen > 65535)
-        plen = 65535;
-    size_t n = 4 + 8 + 2 + plen + 4 + 4 + 4 + 8 + 8;
-    uint8_t *buf = malloc(n);
-    if (!buf)
-        return -1;
-    uint8_t *p = buf;
-    memcpy(p, "NPFS", 4);
-    p += 4;
-    wr_u64(p, id);
-    p += 8;
-    wr_u16(p, (uint16_t)plen);
-    p += 2;
-    memcpy(p, path, plen);
-    p += plen;
-    wr_u32(p, (uint32_t)st->st_mode);
-    p += 4;
-    wr_u32(p, (uint32_t)st->st_uid);
-    p += 4;
-    wr_u32(p, (uint32_t)st->st_gid);
-    p += 4;
-    wr_u64(p, (uint64_t)st->st_size);
-    p += 8;
-    wr_i64(p, (int64_t)st->st_mtime);
-    int rc = control_send(fd, buf, n);
-    free(buf);
-    return rc;
-}
 
-static int handle_hello(int fd, const uint8_t *payload, size_t n) {
+static int handle_hello(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0)
         return -1;
     char ver[256];
     if (rd_str(payload, n, &off, ver, sizeof(ver)) < 0)
-        return send_bin_error(fd, id, 22, "bad hello");
+        return send_bin_error(peer, id, 22, "bad hello");
     (void)ver;
     struct guest_info gi;
     fill_guest_info(&gi);
-    return send_info(fd, id, &gi);
+    return send_info(peer, id, &gi);
 }
 
-static int handle_ping(int fd, const uint8_t *payload, size_t n) {
+static int handle_ping(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0)
         return -1;
-    return send_ok(fd, id);
+    return send_ok(peer, id);
 }
 
-static int send_version(int fd, uint64_t id) {
+static int send_version(struct control_peer *peer, uint64_t id) {
     char ver[NP_MAX_VERSION];
     guest_version(ver, sizeof(ver));
     size_t len = strlen(ver);
@@ -2945,30 +2492,30 @@ static int send_version(int fd, uint64_t id) {
     wr_u64(buf + 4, id);
     wr_u16(buf + 12, (uint16_t)len);
     memcpy(buf + 14, ver, len);
-    int rc = control_send(fd, buf, n);
+    int rc = control_send(peer, buf, n);
     free(buf);
     return rc;
 }
 
-static int handle_get_version(int fd, const uint8_t *payload, size_t n) {
+static int handle_get_version(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0)
         return -1;
-    return send_version(fd, id);
+    return send_version(peer, id);
 }
 
-static int handle_environment_refresh(int fd, const uint8_t *payload, size_t n) {
+static int handle_environment_refresh(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0 || off != n)
         return -1;
     if (refresh_current_environment_profile(1) < 0)
-        return send_bin_error(fd, id, (uint32_t)(errno ? errno : 1),
+        return send_bin_error(peer, id, (uint32_t)(errno ? errno : 1),
                               "environment refresh failed");
     struct guest_info gi;
     fill_guest_info(&gi);
-    return send_info(fd, id, &gi);
+    return send_info(peer, id, &gi);
 }
 
 static int reconcile_guestd_binary(const char *desired_version) {
@@ -3011,7 +2558,7 @@ static void *delayed_reexec(void *unused) {
 /* NPSY: one host-selected desired state for guestd + environment resources.
  * The heavy pull/apply work runs on a worker so the control reader remains
  * responsive to ping, resize and cancellation frames. */
-static int handle_resource_sync(int fd, const uint8_t *payload, size_t n) {
+static int handle_resource_sync(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0, revision = 0;
     char guestd_version[NP_MAX_VERSION];
@@ -3020,18 +2567,18 @@ static int handle_resource_sync(int fd, const uint8_t *payload, size_t n) {
         rd_str(payload, n, &off, guestd_version, sizeof(guestd_version)) < 0 ||
         rd_u64(payload, n, &off, &revision) < 0 ||
         rd_str(payload, n, &off, profile_id, sizeof(profile_id)) < 0 || off != n)
-        return send_bin_error(fd, id, 22, "bad resource desired state");
+        return send_bin_error(peer, id, 22, "bad resource desired state");
 
     pthread_mutex_lock(&resource_sync_lock);
     int updated = reconcile_guestd_binary(guestd_version);
     if (updated < 0) {
         int saved = errno;
         pthread_mutex_unlock(&resource_sync_lock);
-        return send_bin_error(fd, id, (uint32_t)(saved ? saved : 1),
+        return send_bin_error(peer, id, (uint32_t)(saved ? saved : 1),
                               "guestd resource sync failed");
     }
     if (updated > 0) {
-        int rc = send_ok(fd, id);
+        int rc = send_ok(peer, id);
         pthread_mutex_unlock(&resource_sync_lock);
         pthread_t th;
         if (pthread_create(&th, NULL, delayed_reexec, NULL) == 0)
@@ -3043,17 +2590,17 @@ static int handle_resource_sync(int fd, const uint8_t *payload, size_t n) {
     if (reconcile_environment_profile(profile_id, revision, 1) < 0) {
         int saved = errno;
         pthread_mutex_unlock(&resource_sync_lock);
-        return send_bin_error(fd, id, (uint32_t)(saved ? saved : 1),
+        return send_bin_error(peer, id, (uint32_t)(saved ? saved : 1),
                               "environment desired state rejected");
     }
     struct guest_info gi;
     fill_guest_info(&gi);
-    int rc = send_info(fd, id, &gi);
+    int rc = send_info(peer, id, &gi);
     pthread_mutex_unlock(&resource_sync_lock);
     return rc;
 }
 
-static int handle_resize(int fd, const uint8_t *payload, size_t n) {
+static int handle_resize(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     uint32_t cols = 0, rows = 0;
@@ -3061,11 +2608,11 @@ static int handle_resize(int fd, const uint8_t *payload, size_t n) {
         rd_u32(payload, n, &off, &rows) < 0)
         return -1;
     if (resize_console((int)cols, (int)rows) < 0)
-        return send_bin_error(fd, id, (uint32_t)errno, "resize failed");
-    return send_ok(fd, id);
+        return send_bin_error(peer, id, (uint32_t)errno, "resize failed");
+    return send_ok(peer, id);
 }
 
-static int handle_launch(int fd, const uint8_t *payload, size_t n) {
+static int handle_launch(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0)
@@ -3074,21 +2621,24 @@ static int handle_launch(int fd, const uint8_t *payload, size_t n) {
     memset(&req, 0, sizeof(req));
     if (parse_launch_req(payload, n, &off, &req) < 0) {
         launch_req_clear(&req);
-        return send_bin_error(fd, id, 22, "bad launch");
+        return send_bin_error(peer, id, 22, "bad launch");
     }
     int pid = 0;
     int rc = launch_spec(&req, &pid);
     launch_req_clear(&req);
     if (rc < 0) {
         int failure = errno ? errno : EINVAL;
-        return send_bin_error(fd, id, (uint32_t)failure, strerror(failure));
+        return send_bin_error(peer, id, (uint32_t)failure, strerror(failure));
     }
-    rc = send_launched(fd, id, pid);
-    reap_child_async(pid, fd);
-    return rc;
+    if (reap_child_async(pid, peer, id) < 0) {
+        int failure = errno;
+        np_exec_cancel(pid);
+        return send_bin_error(peer, id, (uint32_t)failure, strerror(failure));
+    }
+    return 0;
 }
 
-static int handle_run(int fd, const uint8_t *payload, size_t n) {
+static int handle_run(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0)
@@ -3097,25 +2647,25 @@ static int handle_run(int fd, const uint8_t *payload, size_t n) {
     memset(&req, 0, sizeof(req));
     if (parse_launch_req(payload, n, &off, &req) < 0) {
         launch_req_clear(&req);
-        return send_bin_error(fd, id, 22, "bad run");
+        return send_bin_error(peer, id, 22, "bad run");
     }
     int status = 0;
     uint8_t *outb = NULL, *errb = NULL;
     size_t outn = 0, errn = 0;
-    int rc = run_spec(&req, &status, &outb, &outn, &errb, &errn);
+    int rc = run_spec(peer->fd, &req, &status, &outb, &outn, &errb, &errn);
     launch_req_clear(&req);
     if (rc < 0) {
         free(outb);
         free(errb);
-        return send_bin_error(fd, id, (uint32_t)(errno ? errno : 1), "run failed");
+        return send_bin_error(peer, id, (uint32_t)(errno ? errno : 1), "run failed");
     }
-    rc = send_ran(fd, id, status, outb, outn, errb, errn);
+    rc = send_ran(peer, id, status, outb, outn, errb, errn);
     free(outb);
     free(errb);
     return rc;
 }
 
-static int handle_exec(int fd, const uint8_t *payload, size_t n) {
+static int handle_exec(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     uint32_t cols = 0, rows = 0, terminal = 0;
@@ -3127,53 +2677,53 @@ static int handle_exec(int fd, const uint8_t *payload, size_t n) {
     memset(&req, 0, sizeof(req));
     if (parse_launch_req(payload, n, &off, &req) < 0) {
         launch_req_clear(&req);
-        return send_bin_error(fd, id, 22, "bad exec");
+        return send_bin_error(peer, id, 22, "bad exec");
     }
     int pid = 0;
     uint32_t port = 0;
     int rc = exec_spec(&req, cols, rows, terminal != 0, &pid, &port);
     launch_req_clear(&req);
     if (rc < 0)
-        return send_bin_error(fd, id, (uint32_t)(errno ? errno : 22), "exec failed");
-    return send_exec_session(fd, id, pid, port);
+        return send_bin_error(peer, id, (uint32_t)(errno ? errno : 22), "exec failed");
+    return send_exec_session(peer, id, pid, port);
 }
 
-static int handle_shutdown(int fd, const uint8_t *payload, size_t n) {
+static int handle_shutdown(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0)
         return -1;
-    send_ok(fd, id);
+    send_ok(peer, id);
     pthread_t th;
     pthread_create(&th, NULL, delayed_shutdown, NULL);
     pthread_detach(th);
     return 0;
 }
 
-static int handle_set_user(int fd, const uint8_t *payload, size_t n) {
+static int handle_set_user(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0)
         return -1;
     char user[64], old_user[64];
     if (rd_str(payload, n, &off, user, sizeof(user)) < 0)
-        return send_bin_error(fd, id, 22, "missing username");
+        return send_bin_error(peer, id, 22, "missing username");
     if (off >= n)
-        return send_bin_error(fd, id, 22, "bad setUser");
+        return send_bin_error(peer, id, 22, "bad setUser");
     uint8_t flags = payload[off++];
     int have_old = 0;
     if (flags & NP_SETUSER_HAS_OLD) {
         if (rd_str(payload, n, &off, old_user, sizeof(old_user)) < 0)
-            return send_bin_error(fd, id, 22, "bad oldUsername");
+            return send_bin_error(peer, id, 22, "bad oldUsername");
         have_old = 1;
     }
     if (set_user(user, have_old ? old_user : NULL) < 0)
-        return send_bin_error(fd, id, (uint32_t)(errno ? errno : 1), "setUser failed");
+        return send_bin_error(peer, id, (uint32_t)(errno ? errno : 1), "setUser failed");
     prepare_graphical_session(user);
-    return send_ok(fd, id);
+    return send_ok(peer, id);
 }
 
-static int handle_set_password(int fd, const uint8_t *payload, size_t n) {
+static int handle_set_password(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id = 0;
     if (rd_u64(payload, n, &off, &id) < 0)
@@ -3181,72 +2731,43 @@ static int handle_set_password(int fd, const uint8_t *payload, size_t n) {
     char user[64], pass[256];
     if (rd_str(payload, n, &off, user, sizeof(user)) < 0 ||
         rd_str(payload, n, &off, pass, sizeof(pass)) < 0)
-        return send_bin_error(fd, id, 22, "missing username/password");
+        return send_bin_error(peer, id, 22, "missing username/password");
     if (set_password(user, pass) < 0)
-        return send_bin_error(fd, id, (uint32_t)(errno ? errno : 1), "setPassword failed");
-    return send_ok(fd, id);
+        return send_bin_error(peer, id, (uint32_t)(errno ? errno : 1), "setPassword failed");
+    return send_ok(peer, id);
 }
 
-static int handle_stat_path(int fd, const uint8_t *payload, size_t n) {
-    size_t off = 4;
-    uint64_t id = 0;
-    if (rd_u64(payload, n, &off, &id) < 0)
-        return -1;
-    char path[4096];
-    if (rd_str(payload, n, &off, path, sizeof(path)) < 0 || path[0] != '/')
-        return send_bin_error(fd, id, 22, "path must be absolute");
-    struct stat st;
-    if (lstat(path, &st) < 0)
-        return send_bin_error(fd, id, (uint32_t)errno, "stat failed");
-    return send_path_stat(fd, id, path, &st);
-}
 
-static int handle_write_path(int fd, const uint8_t *payload, size_t n) {
-    size_t off = 4;
-    uint64_t id = 0, size = 0;
-    uint32_t mode = 0;
-    char path[4096];
-    const uint8_t *data = NULL;
-    if (rd_u64(payload, n, &off, &id) < 0 ||
-        rd_str(payload, n, &off, path, sizeof(path)) < 0 || path[0] != '/' ||
-        rd_u32(payload, n, &off, &mode) < 0 || rd_u64(payload, n, &off, &size) < 0 ||
-        size > SIZE_MAX || rd_bytes(payload, n, &off, (size_t)size, &data) < 0 || off != n)
-        return send_bin_error(fd, id, 22, "bad writePath");
-    if (np_write_file(path, data, (size_t)size, (int)(mode & 07777u)) < 0)
-        return send_bin_error(fd, id, (uint32_t)(errno ? errno : 5), "write failed");
-    return send_ok(fd, id);
-}
-
-static int handle_shared_folders(int fd, const uint8_t *payload, size_t n) {
+static int handle_shared_folders(struct control_peer *peer, const uint8_t *payload, size_t n) {
     size_t off = 4;
     uint64_t id;
     if (rd_u64(payload, n, &off, &id) < 0)
         return -1;
     if (n != off + 1 || payload[off] > 1)
-        return send_bin_error(fd, id, EINVAL, "bad shared-folder request");
+        return send_bin_error(peer, id, EINVAL, "bad shared-folder request");
     if (np_shared_folders_set_mounted(payload[off]) < 0) {
         int error = errno;
-        return send_bin_error(fd, id, (uint32_t)error,
+        return send_bin_error(peer, id, (uint32_t)error,
                               error == EBUSY ? "Shared folders are in use. Close their files and try again."
                                              : strerror(error));
     }
-    return send_ok(fd, id);
+    return send_ok(peer, id);
 }
 
 struct control_job {
-    int fd;
+    struct control_peer *peer;
     uint8_t *payload;
     size_t len;
 };
 
 static int is_async_control_request(const uint8_t *payload) {
     return memcmp(payload, "NPSY", 4) == 0 ||
+           memcmp(payload, "NPLN", 4) == 0 ||
            memcmp(payload, "NPSF", 4) == 0 ||
            memcmp(payload, "NPDP", 4) == 0 ||
            memcmp(payload, "NPEU", 4) == 0 ||
            memcmp(payload, "NPRU", 4) == 0 ||
            memcmp(payload, "NPXC", 4) == 0 ||
-           memcmp(payload, "NPWR", 4) == 0 ||
            memcmp(payload, "NPUS", 4) == 0 ||
            memcmp(payload, "NPWP", 4) == 0;
 }
@@ -3256,25 +2777,26 @@ static void *serve_control_job(void *arg) {
     const uint8_t *payload = job->payload;
     size_t n = job->len;
     if (memcmp(payload, "NPSY", 4) == 0)
-        handle_resource_sync(job->fd, payload, n);
+        handle_resource_sync(job->peer, payload, n);
+    else if (memcmp(payload, "NPLN", 4) == 0)
+        handle_launch(job->peer, payload, n);
     else if (memcmp(payload, "NPSF", 4) == 0)
-        handle_shared_folders(job->fd, payload, n);
+        handle_shared_folders(job->peer, payload, n);
     else if (memcmp(payload, "NPDP", 4) == 0)
-        handle_desktop_preferences(job->fd, payload, n);
+        handle_desktop_preferences(job->peer, payload, n);
     else if (memcmp(payload, "NPEU", 4) == 0)
-        handle_environment_refresh(job->fd, payload, n);
+        handle_environment_refresh(job->peer, payload, n);
     else if (memcmp(payload, "NPRU", 4) == 0)
-        handle_run(job->fd, payload, n);
+        handle_run(job->peer, payload, n);
     else if (memcmp(payload, "NPXC", 4) == 0)
-        handle_exec(job->fd, payload, n);
-    else if (memcmp(payload, "NPWR", 4) == 0)
-        handle_write_path(job->fd, payload, n);
+        handle_exec(job->peer, payload, n);
     else if (memcmp(payload, "NPUS", 4) == 0)
-        handle_set_user(job->fd, payload, n);
+        handle_set_user(job->peer, payload, n);
     else if (memcmp(payload, "NPWP", 4) == 0)
-        handle_set_password(job->fd, payload, n);
+        handle_set_password(job->peer, payload, n);
     free(job->payload);
-    close(job->fd);
+    atomic_fetch_sub(&job->peer->jobs, 1);
+    control_peer_release(job->peer);
     free(job);
     return NULL;
 }
@@ -3282,21 +2804,26 @@ static void *serve_control_job(void *arg) {
 /* The reader owns framing and never waits for a long operation. Request IDs
  * allow replies to complete out of order; control_send() preserves frame
  * atomicity across workers. */
-static int dispatch_control_job(int fd, uint8_t *payload, size_t len) {
+static int dispatch_control_job(struct control_peer *peer, uint8_t *payload, size_t len) {
+    if (atomic_fetch_add(&peer->jobs, 1) >= 16) {
+        atomic_fetch_sub(&peer->jobs, 1); errno = EBUSY; return -1;
+    }
     struct control_job *job = calloc(1, sizeof(*job));
-    if (!job)
-        return -1;
-    job->fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
-    if (job->fd < 0) {
-        free(job);
+    if (!job) {
+        atomic_fetch_sub(&peer->jobs, 1);
         return -1;
     }
+    job->peer = peer;
+    control_peer_retain(peer);
     job->payload = payload;
     job->len = len;
     pthread_t th;
-    if (pthread_create(&th, NULL, serve_control_job, job) != 0) {
-        close(job->fd);
+    int error = pthread_create(&th, NULL, serve_control_job, job);
+    if (error != 0) {
+        atomic_fetch_sub(&peer->jobs, 1);
+        control_peer_release(job->peer);
         free(job);
+        errno = error;
         return -1;
     }
     pthread_detach(th);
@@ -3304,16 +2831,14 @@ static int dispatch_control_job(int fd, uint8_t *payload, size_t len) {
 }
 
 static void *serve_session(void *arg) {
-    int fd = (int)(intptr_t)arg;
-    struct list_sess listing;
-    memset(&listing, 0, sizeof(listing));
+    struct control_peer *peer = arg;
     struct guest_info gi;
     fill_guest_info(&gi);
-    send_runtime_ready(fd, &gi);
+    send_runtime_ready(peer, &gi);
 
     for (;;) {
         uint8_t *payload = NULL;
-        ssize_t n = np_npip_recv(fd, &payload);
+        ssize_t n = np_npip_recv(peer->fd, &payload);
         if (n < 0) {
             free(payload);
             break;
@@ -3322,53 +2847,35 @@ static void *serve_session(void *arg) {
             free(payload);
             continue;
         }
-        if (is_async_control_request(payload) &&
-            dispatch_control_job(fd, payload, (size_t)n) == 0)
+        if (is_async_control_request(payload)) {
+            if (dispatch_control_job(peer, payload, (size_t)n) < 0) {
+                size_t offset = 4; uint64_t id;
+                int error = errno;
+                if (rd_u64(payload, (size_t)n, &offset, &id) == 0)
+                    send_bin_error(peer, id, (uint32_t)error, strerror(error));
+                free(payload);
+            }
             continue;
+        }
         if (memcmp(payload, "NPHI", 4) == 0)
-            handle_hello(fd, payload, (size_t)n);
+            handle_hello(peer, payload, (size_t)n);
         else if (memcmp(payload, "NPPG", 4) == 0)
-            handle_ping(fd, payload, (size_t)n);
+            handle_ping(peer, payload, (size_t)n);
         else if (memcmp(payload, "NPVQ", 4) == 0)
-            handle_get_version(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPEU", 4) == 0)
-            handle_environment_refresh(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPSY", 4) == 0)
-            handle_resource_sync(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPSF", 4) == 0)
-            handle_shared_folders(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPDP", 4) == 0)
-            handle_desktop_preferences(fd, payload, (size_t)n);
+            handle_get_version(peer, payload, (size_t)n);
         else if (memcmp(payload, "NPRZ", 4) == 0)
-            handle_resize(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPLN", 4) == 0)
-            handle_launch(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPRU", 4) == 0)
-            handle_run(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPXC", 4) == 0)
-            handle_exec(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPRE", 4) == 0)
-            handle_read_path(fd, payload, (size_t)n, &listing);
-        else if (memcmp(payload, "NPWR", 4) == 0)
-            handle_write_path(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPCT", 4) == 0)
-            handle_list_continue(fd, payload, (size_t)n, &listing);
-        else if (memcmp(payload, "NPCL", 4) == 0)
-            handle_list_cancel(payload, (size_t)n, &listing);
-        else if (memcmp(payload, "NPMS", 4) == 0)
-            handle_stat_path(fd, payload, (size_t)n);
+            handle_resize(peer, payload, (size_t)n);
         else if (memcmp(payload, "NPSH", 4) == 0)
-            handle_shutdown(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPUS", 4) == 0)
-            handle_set_user(fd, payload, (size_t)n);
-        else if (memcmp(payload, "NPWP", 4) == 0)
-            handle_set_password(fd, payload, (size_t)n);
-        else
-            logmsg("unknown control magic");
+            handle_shutdown(peer, payload, (size_t)n);
+        else {
+            size_t offset = 4; uint64_t id;
+            if (rd_u64(payload, (size_t)n, &offset, &id) == 0)
+                send_bin_error(peer, id, ENOSYS, "unsupported control request");
+        }
         free(payload);
     }
-    list_sess_close(&listing);
-    close(fd);
+    shutdown(peer->fd, SHUT_RDWR);
+    control_peer_release(peer);
     return NULL;
 }
 
@@ -3388,10 +2895,14 @@ static int listen_control(void) {
                 continue;
             break;
         }
+        if (!np_vsock_peer_is_host(cfd)) { close(cfd); continue; }
         logmsg("control connection");
         pthread_t th;
-        pthread_create(&th, NULL, serve_session, (void *)(intptr_t)cfd);
-        pthread_detach(th);
+        struct control_peer *peer = control_peer_create(cfd);
+        if (!peer) { close(cfd); continue; }
+        if (pthread_create(&th, NULL, serve_session, peer) != 0)
+            control_peer_release(peer);
+        else pthread_detach(th);
     }
     close(fd);
     return 1;
@@ -3432,5 +2943,9 @@ int main(int argc, char **argv) {
         pthread_create(&th, NULL, session_stack_thread, NULL);
         pthread_detach(th);
     }
-    return listen_control();
+    struct np_file_service *files = np_file_service_start(NP_FILE_ROOT_PORT, "/");
+    if (!files) { logmsg("cannot start root file service"); return 1; }
+    int result = listen_control();
+    np_file_service_stop(files);
+    return result;
 }

@@ -16,6 +16,7 @@ install)
 		pacman -Syu --noconfirm --needed \
 			systemd iproute2 util-linux kmod shadow sudo ca-certificates dbus \
 			xdg-user-dirs gsettings-desktop-schemas ttf-dejavu adwaita-icon-theme \
+			glib2 gdk-pixbuf2 librsvg \
 			pipewire pipewire-audio pipewire-alsa pipewire-pulse wireplumber \
 			rtkit realtime-privileges \
 			mesa vulkan-virtio wayland libxkbcommon libxcb xcb-util-cursor \

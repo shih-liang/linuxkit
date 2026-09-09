@@ -1,4 +1,5 @@
 #include "np.h"
+#include "np_file_rpc.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -53,13 +55,15 @@ static void *write_payload(void *opaque) {
     t->write_rc = 0;
     while (left > 0) {
         size_t chunk = left > sizeof(block) ? sizeof(block) : left;
-        if (np_write_full(t->write_fd, block, chunk) < 0) {
+        if (np_file_send(t->write_fd, NP_FILE_DATA, 0, 0, block, chunk) < 0) {
             t->write_rc = -1;
             break;
         }
         left -= chunk;
         sched_yield();
     }
+    unsigned char end[8]; np_file_put64(end, PAYLOAD_SIZE - left);
+    if (t->write_rc == 0) t->write_rc = np_file_send(t->write_fd, NP_FILE_END, 0, 0, end, sizeof(end));
     close(t->write_fd);
     return NULL;
 }
@@ -98,6 +102,22 @@ static void verify_no_staging_files(const char *dir_path) {
 }
 
 int main(void) {
+#ifdef __linux__
+    int inherited[2];
+    check(pipe(inherited) == 0, "child descriptor fixture");
+    pid_t child = fork();
+    check(child >= 0, "child descriptor fork");
+    if (!child) {
+        if (np_child_cloexec() < 0 || !(fcntl(inherited[0], F_GETFD) & FD_CLOEXEC) ||
+            !(fcntl(inherited[1], F_GETFD) & FD_CLOEXEC)) _exit(1);
+        _exit(0);
+    }
+    int child_status;
+    check(waitpid(child, &child_status, 0) == child && WIFEXITED(child_status) &&
+          WEXITSTATUS(child_status) == 0, "child descriptors are close-on-exec");
+    check(!(fcntl(inherited[0], F_GETFD) & FD_CLOEXEC), "parent descriptors are unchanged");
+    close(inherited[0]); close(inherited[1]);
+#endif
     char root[] = "/tmp/nativepipe-atomic-test.XXXXXX";
     check(mkdtemp(root) != NULL, "mkdtemp failed");
     char destination[PATH_MAX];

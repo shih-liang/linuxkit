@@ -4,15 +4,17 @@
 # Version is baked into the ELF as the ASCII stamp "NPGV:<semver>" from ./VERSION.
 
 ZIG ?= zig
-COMMON := ../common/np.c
-CONSOLE := console_config.c
+FILE_RPC_DIR ?= $(abspath ../../../nativepipe/common/file_rpc)
+COMMON := ../common/np.c $(FILE_RPC_DIR)/np_file_wire.c $(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c
+HEADERS := ../common/np.h $(FILE_RPC_DIR)/np_file_rpc.h exec_stream.h
+CONSOLE := console_config.c exec_stream.c
 CLOUD_INIT := cloud_init_config.c
 ENVIRONMENT := environment_config.c
 MDEV := mdev_config.c
 SESSION_STACK := session_stack.c
 SHARED_FOLDERS := shared_folders.c
 VERSION := $(shell tr -d '[:space:]' < VERSION)
-CFLAGS := -I../common -O2 -static -s -pthread -DNP_GUESTD_VERSION=\"$(VERSION)\"
+CFLAGS := -I../common -I$(FILE_RPC_DIR) -O2 -static -s -pthread -DNP_GUESTD_VERSION=\"$(VERSION)\"
 HOST_CC ?= cc
 HOST_TEST := /tmp/nativepipe-console-config-test
 HOST_CLOUD_TEST := /tmp/nativepipe-cloud-init-config-test
@@ -28,10 +30,10 @@ all: aarch64 x86_64
 aarch64: dist/nativepipe-guestd-aarch64
 x86_64: dist/nativepipe-guestd-x86_64
 
-dist/nativepipe-guestd-aarch64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(SHARED_FOLDERS) shared_folders.h $(COMMON) VERSION | dist
+dist/nativepipe-guestd-aarch64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(SHARED_FOLDERS) shared_folders.h $(COMMON) $(HEADERS) VERSION | dist
 	$(ZIG) cc -target aarch64-linux-musl $(CFLAGS) -o $@ nativepipe-guestd.c $(CONSOLE) $(CLOUD_INIT) $(ENVIRONMENT) $(SESSION_STACK) $(SHARED_FOLDERS) $(COMMON) -lutil
 
-dist/nativepipe-guestd-x86_64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(SHARED_FOLDERS) shared_folders.h $(COMMON) VERSION | dist
+dist/nativepipe-guestd-x86_64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(SHARED_FOLDERS) shared_folders.h $(COMMON) $(HEADERS) VERSION | dist
 	$(ZIG) cc -target x86_64-linux-musl $(CFLAGS) -o $@ nativepipe-guestd.c $(CONSOLE) $(CLOUD_INIT) $(ENVIRONMENT) $(SESSION_STACK) $(SHARED_FOLDERS) $(COMMON) -lutil
 
 test: test-console test-cloud-init test-environment test-mdev test-session-stack
@@ -62,7 +64,7 @@ test-session-stack: $(SESSION_STACK) session_stack.h tests/session_stack_test.c
 
 # Integration check: run as root inside Linux with the shared-folder device.
 test-shared-folders: $(SHARED_FOLDERS) shared_folders.h tests/shared_folders_test.c
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -pthread -I. -I../common \
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -pthread -I. -I../common -I$(FILE_RPC_DIR) \
 		-o $(HOST_SHARED_FOLDERS_TEST) $(SHARED_FOLDERS) $(COMMON) tests/shared_folders_test.c
 	$(HOST_SHARED_FOLDERS_TEST)
 

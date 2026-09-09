@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "np_file_rpc.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -81,7 +82,13 @@ struct buffer {
 };
 
 static int control_connection = -1;
+static struct np_file_service *file_service;
 extern char **environ;
+
+static void stop_file_service(void) {
+    np_file_service_stop(file_service);
+    file_service = NULL;
+}
 
 static void initialize_plan(struct np_plan *plan) {
     memset(plan, 0, sizeof(*plan));
@@ -91,6 +98,7 @@ static void initialize_plan(struct np_plan *plan) {
 }
 
 static void close_control_transport(void) {
+    stop_file_service();
     if (control_connection >= 0) {
         shutdown(control_connection, SHUT_RDWR);
         close(control_connection);
@@ -761,167 +769,6 @@ static int mount_selected(const char *identifier, uint16_t partition, bool writa
     return 0;
 }
 
-static int open_root(void) {
-    if (!root_is_mounted()) {
-        errno = ENOMEDIUM;
-        return -1;
-    }
-    return open(NP_NEW_ROOT, O_PATH | O_DIRECTORY | O_CLOEXEC);
-}
-
-static const char *relative_path(const char *path) {
-    while (*path == '/')
-        path++;
-    return *path ? path : ".";
-}
-
-static int open_in_target_root(int root, const char *path, int flags, mode_t mode) {
-    struct open_how how = {
-        .flags = (uint64_t)flags,
-        .mode = mode,
-        .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
-    };
-    return (int)syscall(SYS_openat2, root, relative_path(path), &how, sizeof(how));
-}
-
-static int read_request_path(const uint8_t *payload, size_t length, char path[4096]) {
-    struct reader reader = {payload, length, 12};
-    if (take_string(&reader, path, 4096) < 0 || reader.offset != length || path[0] != '/') {
-        errno = EINVAL;
-        return -1;
-    }
-    return 0;
-}
-
-static int send_path_stat(int connection, uint64_t request_id, const char *path) {
-    int root = open_root();
-    if (root < 0)
-        return -1;
-    int fd = open_in_target_root(root, path, O_PATH | O_NOFOLLOW | O_CLOEXEC, 0);
-    close(root);
-    if (fd < 0)
-        return -1;
-    struct stat status;
-    int result = fstat(fd, &status);
-    close(fd);
-    if (result < 0)
-        return -1;
-    struct buffer response = {0};
-    result = append(&response, "NPFS", 4) < 0 ||
-                     append_u64(&response, request_id) < 0 ||
-                     append_string(&response, path) < 0 ||
-                     append_u32(&response, (uint32_t)status.st_mode) < 0 ||
-                     append_u32(&response, (uint32_t)status.st_uid) < 0 ||
-                     append_u32(&response, (uint32_t)status.st_gid) < 0 ||
-                     append_u64(&response, (uint64_t)status.st_size) < 0 ||
-                     append_u64(&response, (uint64_t)status.st_mtime) < 0
-                 ? -1 : send_buffer(connection, &response);
-    free(response.bytes);
-    return result;
-}
-
-static int send_path_contents(int connection, uint64_t request_id, const char *path) {
-    int root = open_root();
-    if (root < 0)
-        return -1;
-    int fd = open_in_target_root(root, path, O_RDONLY | O_CLOEXEC, 0);
-    close(root);
-    if (fd < 0)
-        return -1;
-    struct stat status;
-    if (fstat(fd, &status) < 0) {
-        close(fd);
-        return -1;
-    }
-    struct buffer response = {0};
-    int result = -1;
-    if (S_ISREG(status.st_mode)) {
-        if (status.st_size < 0 || (uint64_t)status.st_size > NP_MAX_PAYLOAD - 32u - strlen(path)) {
-            errno = EFBIG;
-            goto done;
-        }
-        if (append(&response, "NPFL", 4) < 0 || append_u64(&response, request_id) < 0 ||
-            append_string(&response, path) < 0 ||
-            append_u64(&response, (uint64_t)status.st_size) < 0 ||
-            reserve(&response, (size_t)status.st_size) < 0)
-            goto done;
-        if (read_full(fd, response.bytes + response.length, (size_t)status.st_size) < 0)
-            goto done;
-        response.length += (size_t)status.st_size;
-    } else if (S_ISDIR(status.st_mode)) {
-        DIR *directory = fdopendir(fd);
-        if (!directory)
-            goto done;
-        fd = -1;
-        if (append(&response, "NPLS", 4) < 0 || append_u64(&response, request_id) < 0 ||
-            append_string(&response, path) < 0 || append_u32(&response, 0) < 0 ||
-            append_u32(&response, 0) < 0) {
-            closedir(directory);
-            goto done;
-        }
-        uint32_t count = 0;
-        struct dirent *entry;
-        while ((entry = readdir(directory))) {
-            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
-                continue;
-            if (append_u8(&response, entry->d_type) < 0 || append_u8(&response, 0) < 0 ||
-                append_string(&response, entry->d_name) < 0) {
-                closedir(directory);
-                goto done;
-            }
-            count++;
-        }
-        closedir(directory);
-        size_t count_offset = 4 + 8 + 2 + strlen(path) + 4;
-        for (unsigned index = 0; index < 4; index++)
-            response.bytes[count_offset + index] = (uint8_t)(count >> (index * 8));
-    } else {
-        errno = EINVAL;
-        goto done;
-    }
-    result = send_buffer(connection, &response);
-done:
-    if (fd >= 0)
-        close(fd);
-    free(response.bytes);
-    return result;
-}
-
-static int write_path(const uint8_t *payload, size_t length) {
-    struct reader reader = {payload, length, 12};
-    char path[4096];
-    uint8_t fixed[12];
-    if (take_string(&reader, path, sizeof(path)) < 0 || path[0] != '/' ||
-        take_bytes(&reader, fixed, sizeof(fixed)) < 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    uint32_t mode = read_le32(fixed);
-    uint64_t size = read_le64(fixed + 4);
-#if SIZE_MAX < UINT64_MAX
-    if (size > SIZE_MAX) {
-        errno = EFBIG;
-        return -1;
-    }
-#endif
-    if ((size_t)size != reader.length - reader.offset) {
-        errno = EINVAL;
-        return -1;
-    }
-    int root = open_root();
-    if (root < 0)
-        return -1;
-    int fd = open_in_target_root(root, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-                          (mode_t)(mode & 07777u));
-    close(root);
-    if (fd < 0)
-        return -1;
-    int result = write_full(fd, reader.bytes + reader.offset, (size_t)size);
-    if (result == 0)
-        result = fchmod(fd, (mode_t)(mode & 07777u));
-    close(fd);
-    return result;
-}
 
 static void sleep_milliseconds(uint64_t milliseconds) {
     struct timespec delay = {
@@ -1011,7 +858,7 @@ static int preflight_executable_at(int root, const char *path, unsigned depth) {
         errno = ELOOP;
         return -1;
     }
-    int fd = open_in_target_root(root, path, O_RDONLY | O_CLOEXEC, 0);
+    int fd = np_file_open(root, path, O_RDONLY | O_NONBLOCK, 0);
     if (fd < 0)
         return -1;
     struct stat status;
@@ -1191,6 +1038,7 @@ static int move_runtime_mounts(size_t *moved) {
 static int switch_to_root(
     const struct np_plan *plan, int acknowledgement_connection, bool *response_sent
 ) {
+    stop_file_service();
     if (response_sent)
         *response_sent = false;
     if (mount_root(plan) < 0 || preflight_target_init(plan) < 0 ||
@@ -1282,7 +1130,7 @@ static int append_guest_info(struct buffer *response) {
     };
     const char *capabilities[] = {
         "init.control", "init.mount", "init.execute", "init.install.rootfs.v1",
-        "fs.read", "fs.stat", "fs.write",
+        "fs.read", "fs.stat", "fs.write", "fs.stream.v1",
     };
     for (size_t index = 0; index < sizeof(fields) / sizeof(fields[0]); index++) {
         if (append_string(response, fields[index]) < 0)
@@ -1338,6 +1186,7 @@ static int dispatch_request(int connection, const uint8_t *payload, size_t lengt
     } else if (!memcmp(payload, "NPIH", 4) && length == 12) {
         result = send_inventory(connection, request_id);
     } else if (!memcmp(payload, "NPIM", 4)) {
+        stop_file_service();
         struct reader reader = {payload, length, 12};
         char identifier[21];
         uint8_t fixed[4];
@@ -1348,18 +1197,8 @@ static int dispatch_request(int connection, const uint8_t *payload, size_t lengt
             result = send_ack(connection, request_id);
         else if (!errno)
             errno = EINVAL;
-    } else if (!memcmp(payload, "NPRE", 4)) {
-        char path[4096];
-        if (read_request_path(payload, length, path) == 0)
-            result = send_path_contents(connection, request_id, path);
-    } else if (!memcmp(payload, "NPMS", 4)) {
-        char path[4096];
-        if (read_request_path(payload, length, path) == 0)
-            result = send_path_stat(connection, request_id, path);
-    } else if (!memcmp(payload, "NPWR", 4)) {
-        if (write_path(payload, length) == 0)
-            result = send_ack(connection, request_id);
     } else if (!memcmp(payload, "NPIC", 4)) {
+        stop_file_service();
         struct np_plan plan;
         if (decode_plan(payload, length, &plan) == 0) {
             bool response_sent = false;
@@ -1534,6 +1373,10 @@ int main(void) {
             continue;
         }
         failed_connections = 0;
+        if (!file_service && root_is_mounted()) {
+            file_service = np_file_service_start(NP_FILE_ROOT_PORT, NP_NEW_ROOT);
+            if (!file_service) log_errno("start recovery file service");
+        }
         if (send_ready_handshake(control_connection) < 0) {
             log_errno("send recovery handshake");
             close_control_transport();
@@ -1549,6 +1392,10 @@ int main(void) {
                 break;
             }
             dispatch_request(control_connection, payload, length);
+            if (!file_service && control_connection >= 0 && root_is_mounted()) {
+                file_service = np_file_service_start(NP_FILE_ROOT_PORT, NP_NEW_ROOT);
+                if (!file_service) log_errno("start recovery file service");
+            }
             free(payload);
         }
         close_control_transport();

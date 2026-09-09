@@ -18,6 +18,12 @@ the commit that built the release.
 
 Zig cross-compiles static musl binaries for both supported guest architectures.
 The host tests require only a C compiler and Python 3.
+Keep the NativePipe checkout beside this repository, or set `FILE_RPC_DIR` to
+its `common/file_rpc` directory. CI checks out this shared source explicitly;
+bootstrap, guestd and recovery do not carry private protocol copies.
+Guest execution requires Linux 5.11 or newer for child-side
+[`close_range(CLOSE_RANGE_CLOEXEC)`](https://man7.org/linux/man-pages/man2/close_range.2.html);
+supported FluxWindow kernels provide it.
 
 ```sh
 make -C guest-platform test
@@ -37,6 +43,20 @@ downloaded by FluxWindow as VM boot resources and are not embedded in the
 application's guest runtime.
 
 ## Shared folders
+
+### File operations
+
+guestd 0.2.39 serves NPFR v1 on vsock port 1025 (`fs.stream.v1`); the compositor
+serves the identical library on port 1026 with its ordinary user's credentials.
+Both accept host CID 2 only. Root administration and user transfers are distinct
+endpoints: the protocol has no request field for changing UID/GID.
+READ/WRITE/LIST use at most 64 KiB per record, socket backpressure and independent
+operation connections. Cancelling closes only that operation. The wire format
+and limitations are documented in NativePipe's `common/file_rpc/README.md`.
+Recovery stops and joins its file workers before replacing `/newroot` or
+switching root. Bootstrap uses the same chunk framing for named NPAG artifacts.
+
+### Persistent shared folders
 
 guestd does not mount the host shared-folder device at startup. After the
 handshake, FluxWindow sends `NPSF` (request ID and one mounted/unmounted byte)

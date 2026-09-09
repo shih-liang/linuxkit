@@ -100,6 +100,7 @@ EOF
 		iproute2 util-linux kmod passwd sudo ca-certificates pipewire-audio rtkit \
 		libpam-systemd libpam-modules libpam-runtime \
 		xdg-user-dirs gsettings-desktop-schemas fonts-dejavu-core adwaita-icon-theme \
+		libglib2.0-0t64 libgdk-pixbuf-2.0-0 librsvg2-2 \
 		libgl1 libgles2 libegl1 libgl1-mesa-dri libegl-mesa0 libglx-mesa0 \
 		mesa-vulkan-drivers libwayland-server0 libxkbcommon0 \
 		libxcb1 libxcb-cursor0 xwayland
