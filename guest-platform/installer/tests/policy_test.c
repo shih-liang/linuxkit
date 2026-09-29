@@ -45,7 +45,12 @@ int main(void) {
     assert(!strcmp(argv[0], "/usr/bin/apt-get"));
     assert(!strcmp(argv[4], "curl") && !strcmp(argv[5], "git") && argv[6] == NULL);
     assert(np_package_arguments(ubuntu, 0, "-bad", argv, 128, storage, sizeof(storage)) < 0);
-    const char *ids[] = {"alpine", "debian", "ubuntu", "fedora", "archlinux-arm"};
+    const struct np_distribution *arch64 = np_distribution_find("archlinux");
+    assert(arch64 && !strcmp(arch64->os_id, "arch"));
+    assert(!strcmp(arch64->architecture, "amd64") && arch64->rootfs_format == NP_ROOTFS_ARCH_BOOTSTRAP);
+    assert(!strcmp(arch64->pacman_keyring, "archlinux") && !strcmp(arch->pacman_keyring, "archlinuxarm"));
+    assert(strstr(arch64->base_packages, "systemd-sysvcompat"));
+    const char *ids[] = {"alpine", "debian", "ubuntu", "fedora", "archlinux-arm", "archlinux"};
     for (unsigned i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
         const struct np_distribution *d = np_distribution_find(ids[i]);
         assert(d);

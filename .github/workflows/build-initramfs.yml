@@ -217,14 +217,15 @@ jobs:
           set -eu
           rpc="$PWD/.deps/nativepipe/common/file_rpc"
           make -C "$rpc" test
-          cc -O2 -Wall -Wextra -Werror -pthread -I"$rpc" \
-            nativepipe-init/test-nativepipe-init.c "$rpc/build/libnativepipe-file-rpc.a" \
+          cc -O2 -Wall -Wextra -Werror -pthread -I"$rpc" -Iguest-platform/common \
+            nativepipe-init/test-nativepipe-init.c guest-platform/common/rosetta.c guest-platform/common/np.c \
+            "$rpc/build/libnativepipe-file-rpc.a" \
             -o nativepipe-init-self-test
           ./nativepipe-init-self-test
           mkdir -p initramfs-root/sbin
           make -C "$rpc" CC="${CROSS_COMPILE}gcc" AR="${CROSS_COMPILE}ar" BUILD=build-arm64
-          "$CROSS_COMPILE"gcc -static -Os -Wall -Wextra -Werror -pthread -I"$rpc" \
-            nativepipe-init/nativepipe-init.c \
+          "$CROSS_COMPILE"gcc -static -Os -Wall -Wextra -Werror -pthread -I"$rpc" -Iguest-platform/common \
+            nativepipe-init/nativepipe-init.c guest-platform/common/rosetta.c guest-platform/common/np.c \
             "$rpc/build-arm64/libnativepipe-file-rpc.a" \
             -o initramfs-root/sbin/nativepipe-init
           "$CROSS_COMPILE"strip initramfs-root/sbin/nativepipe-init

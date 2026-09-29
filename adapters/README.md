@@ -12,7 +12,7 @@ the recovery/payload lifecycle.
 `versionSeries` pins an approved release line: Ubuntu **26.04**, Debian **13**,
 Fedora **44**, and Alpine **3.24**. Patch releases inside that line remain
 discoverable. Advancing to another line requires installation/runtime testing
-and a catalog revision. ARM64 and optional amd64 sources carry the same policy.
+and a catalog revision. ARM64 and amd64 root-system sources carry the same policy.
 Artifact URLs and digests still come from the publisher, not a generated
 `latest` record in this repository.
 
@@ -20,14 +20,17 @@ Alpine uses the explicit `v3.24` directory instead of `latest-stable`. Debian
 uses `trixie/` instead of `stable/`, while continuing to resolve all metadata at
 one immutable publisher commit. Arch Linux ARM is rolling and has no stable
 major release: its installation image is pinned to the tested **2026.08**
-snapshot. Arch package repositories still roll, so this image pin does not
+snapshot; Arch Linux amd64 uses the **2026.09.01** bootstrap snapshot. The
+bootstrap's `root.x86_64/` envelope is removed by the shared archive extractor,
+and the Arch Linux keyring and HTTPS mirror are selected by its C policy.
+Arch package repositories still roll, so this image pin does not
 freeze package versions or promise future package compatibility.
 
 When the creation marketplace opens, FluxWindow reads each publisher-owned
-`indexURL`, selects matching ARM64 artifacts, obtains the publisher's checksum,
+`indexURL`, selects artifacts for the chosen userspace architecture, obtains the publisher's checksum,
 and caches the resolved releases in its own Application Support directory. New
 results replace the `Latest` marker within the approved line. Both discovery
-and cache loading enforce the same policy, including an optional amd64 rootfs;
+and cache loading enforce the same policy, including the amd64 root system;
 cached releases outside the line are no longer offered for new installations.
 Existing VM disks are unaffected. FluxWindow verifies the downloaded rootfs before installation, and
 the C installer checks it again before preparing the disk. Debian's published
@@ -45,7 +48,13 @@ install both Xwayland and `xwayland-satellite`; Ubuntu installs Xwayland and
 enables satellite only when that package appears in its configured archive.
 Neither linuxkit nor NativePipe carries a private satellite executable.
 
-All package installation, including optional software, completes inside the
+Application names and available GUI choices come from
+[`applications.json`](../guest-platform/installer/applications.json);
+[`sync-apps.py`](sync-apps.py) keeps this catalog in sync. See the
+[application installer](../guest-platform/installer/APPLICATIONS.md) for package
+mappings, official presets and the post-install `apps` command.
+
+All initial package installation, including optional software, completes inside the
 installer's chroot before handing off to the real init. The installer reads the
 payload from a read-only, noexec share; package operations use private mount and
 PID namespaces. A failed package transaction leaves the task in recovery with
@@ -102,57 +111,32 @@ enabled. Explicit extra boot arguments can override the default. EFI boot uses
 the guest bootloader's own command line. Changed boot arguments take effect on
 the next VM boot, not by restarting the audio services.
 
-## Ubuntu amd64 environment
+## amd64 root systems
 
-Ubuntu offers an optional `amd64-rootfs` component. The native ARM64 root still
-owns init, guestd, the compositor, devices and services. A separate Ubuntu
-amd64 userspace lives at `/var/lib/nativepipe/amd64`, with its own libraries and
-package database. No x86 kernel or x86 PID 1 is booted.
+Select **Alpine Linux (amd64)**, **Debian (amd64)**, **Ubuntu (amd64)**,
+**Fedora (amd64)** or **Arch Linux (amd64)** under operating systems to install
+an amd64 filesystem as the VM root. Each uses its distribution packages,
+account database, init system, and amd64 guestd, session and compositor.
+Alpine uses BusyBox init and OpenRC; the others use systemd. There is no second
+rootfs or schroot launcher. Software choices contain only Developer Tools;
+architecture, Wine and Steam are not software installation options.
 
-The catalog's `amd64Source` uses the same publisher discovery/checksum policy as
-the base source. FluxWindow pairs images by exact release version and verifies
-each archive independently. Failure to find an amd64 image leaves native releases
-available but prevents choosing the additional environment. Both downloads move
-into the installation payload without retaining second copies.
+The VM still boots a **4 KiB ARM64 kernel**. The native initramfs validates the
+amd64 init and dynamic loader, mounts the Rosetta virtiofs share, registers only
+x86-64 ELF files with binfmt_misc, then moves runtime mounts and switches root.
+The read-only Rosetta mount remains at `/run/rosetta`; the F flag pins its
+interpreter. Translation is available before the first amd64 process starts.
 
-Rosetta requires the **4 KiB ARM64 kernel**: ordinary Ubuntu amd64 ELF programs
-fail to map under the 16 KiB kernel. FluxWindow selects and pins the Rosetta
-variant for new installations using Rosetta; adding it does not change existing
-VMs' automatic 16 KiB kernel selection. The boot header is checked on the Mac,
-and the shared C Rosetta module checks the actual guest page size before disk
-preparation.
-The release workflow builds both variants from one device/security configuration
-plus `config-rosetta-aarch64`, and publishes one shared ARM64 initramfs.
-
-`guest-platform/common/rosetta.c` owns the virtiofs mount and the x86-64-only binfmt
-registration, shared by recovery installation and the normal guest service.
-The C installer owns extraction and package operations for the separate userspace;
-`installer/amd64.c` configures the standard distribution `schroot` entry. Shared
-root/account modules retain namespace cleanup and account policy.
-Runtime sessions, user authorization, terminal handling and mount teardown are
-provided by schroot; FluxWindow reuses its existing VM terminal/exec transport.
-
-NativePipe owns GPU page-size compatibility. Its preload library handles both
-legacy and extended virtio-gpu blob ioctls, and its Vulkan layer aligns host-visible
-allocations before export. FluxWindow packages the ARM and amd64 builds; the
-installer puts the amd64 libraries inside the additional rootfs. The schroot
-entry discards inherited ARM loader settings and loads only amd64 libraries.
-Recursive slave mounts include systemd's per-user tmpfs and nested shared folders;
-schroot tears down these session mounts without unmounting the native sources.
-
-After installation, choose **amd64 Shell** in the terminal workspace, or run:
+`guest-platform/common/rosetta.c` is shared by recovery installation, early boot
+and optional compatibility on ARM64 systems. Distribution package and service
+configuration is shared by both root architectures. FluxWindow pins the updated
+initramfs inside the VM for subsequent boots and requires Rosetta to stay enabled.
+The host publishes runtime files by the root's ABI, including self-updates and
+matching graphics hooks. The normal VM terminal and application entrypoints work
+directly; the historical amd64 Shell remains only for old nested environments.
 
 ```sh
-fluxwindow -d Ubuntu nativepipe-amd64
-fluxwindow --no-pty -d Ubuntu nativepipe-amd64 dpkg --print-architecture
-fluxwindow -d Ubuntu nativepipe-amd64 sudo apt-get install <package>
-fluxwindow -d Ubuntu nativepipe-amd64 <application> <arguments...>
+fluxwindow -d Ubuntu-amd64
+fluxwindow --no-pty -d Ubuntu-amd64 dpkg --print-architecture
+fluxwindow -d Ubuntu-amd64 sudo apt-get install <package>
 ```
-
-The selected VM account keeps its UID and password-protected sudo policy.
-Home directories, VM shared folders and user Wayland/X11/audio/D-Bus sockets
-remain accessible. The native system manager socket is not shared. Package
-scripts cannot start a second init; an amd64 package manager updates only the
-amd64 package database. This is a compatibility environment for trusted VM
-applications, not a security boundary from the native VM. Rosetta translates
-x86-64 applications; 32-bit x86 software still needs an appropriate translator.

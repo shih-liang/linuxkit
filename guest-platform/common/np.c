@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -225,7 +227,52 @@ int np_child_cloexec(void) {
 #ifdef __linux__
     /* In the forked child only. This covers even descriptors another agent
      * thread opened just before fork, without a million-FD scanning loop. */
-    return (int)syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC);
+    if (syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) == 0) return 0;
+    if (errno != ENOSYS && errno != EINVAL && errno != EOPNOTSUPP) return -1;
+    /* Some translation runtimes lack close_range. Enumerate only open FDs,
+     * without malloc/stdio locks after a multithreaded fork. Fail closed if
+     * procfs is unavailable instead of leaking the host-control descriptors. */
+    struct entry64 {
+        uint64_t ino;
+        int64_t offset;
+        unsigned short length;
+        unsigned char type;
+        char name[];
+    };
+    int directory = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory < 0) return -1;
+    char data[4096] __attribute__((aligned(8)));
+    int result = -1;
+    for (;;) {
+        long count = syscall(SYS_getdents64, directory, data, sizeof(data));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) break;
+        if (!count) { result = 0; break; }
+        for (long at = 0; at < count; ) {
+            struct entry64 *entry = (struct entry64 *)(data + at);
+            size_t prefix = offsetof(struct entry64, name);
+            if ((size_t)(count - at) <= prefix || entry->length <= prefix ||
+                entry->length > count - at) { errno = EIO; goto done; }
+            unsigned fd = 0;
+            size_t i = 0, limit = entry->length - prefix;
+            for (; i < limit && entry->name[i] >= '0' && entry->name[i] <= '9'; i++) {
+                unsigned digit = (unsigned)(entry->name[i] - '0');
+                if (fd > ((unsigned)INT_MAX - digit) / 10) { errno = EIO; goto done; }
+                fd = fd * 10 + digit;
+            }
+            if (i == limit) { errno = EIO; goto done; }
+            if (i && !entry->name[i] && fd >= 3 && (int)fd != directory) {
+                int flags = fcntl((int)fd, F_GETFD);
+                if (flags < 0 || fcntl((int)fd, F_SETFD, flags | FD_CLOEXEC) < 0) goto done;
+            }
+            at += entry->length;
+        }
+    }
+done:;
+    int saved = errno;
+    close(directory);
+    errno = saved;
+    return result;
 #else
     /* Common transport unit tests also build on macOS; guest programs do not. */
     return 0;

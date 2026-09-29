@@ -1,0 +1,136 @@
+{
+  "applications": [
+    {
+      "id": "developer-tools",
+      "name": "Developer Tools",
+      "description": "Compiler, Git and curl.",
+      "visible": true,
+      "packages": {
+        "apk": "build-base curl git",
+        "apt": "build-essential curl git",
+        "dnf": "gcc gcc-c++ make cmake curl git",
+        "pacman": "base-devel curl git"
+      }
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "description": "Version control.",
+      "packages": {
+        "all": "git"
+      }
+    },
+    {
+      "id": "curl",
+      "name": "curl",
+      "description": "HTTP command-line client.",
+      "packages": {
+        "all": "curl ca-certificates"
+      }
+    },
+    {
+      "id": "python",
+      "name": "Python",
+      "description": "Python 3 and pip.",
+      "packages": {
+        "apk": "python3 py3-pip",
+        "apt": "python3 python3-pip python3-venv",
+        "dnf": "python3 python3-pip",
+        "pacman": "python python-pip"
+      }
+    },
+    {
+      "id": "nodejs",
+      "name": "Node.js",
+      "description": "Node.js and npm.",
+      "packages": {
+        "all": "nodejs npm"
+      }
+    },
+    {
+      "id": "ripgrep",
+      "name": "ripgrep",
+      "description": "Command-line text search.",
+      "packages": {
+        "all": "ripgrep"
+      }
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "description": "OpenAI coding CLI. Sign in after installation.",
+      "visible": true,
+      "dependencies": {
+        "all": "tar gzip jq git"
+      },
+      "scripts": {
+        "all": "codex.sh"
+      }
+    },
+    {
+      "id": "claudecode",
+      "name": "Claude Code",
+      "description": "Anthropic coding CLI. Sign in after installation.",
+      "visible": true,
+      "dependencies": {
+        "apk": "bash libgcc libstdc++ ripgrep",
+        "apt": "gnupg bash ripgrep",
+        "dnf": "gnupg2 bash ripgrep",
+        "pacman": "gnupg jq bash ripgrep"
+      },
+      "scripts": {
+        "apk": "claudecode-apk.sh",
+        "apt": "claudecode-apt.sh",
+        "dnf": "claudecode-dnf.sh",
+        "pacman": "claudecode-pacman.sh"
+      },
+      "packages": {
+        "apk": "claude-code",
+        "apt": "claude-code",
+        "dnf": "claude-code"
+      }
+    },
+    {
+      "id": "chatgpt-desktop",
+      "name": "ChatGPT Desktop",
+      "description": "Official Linux preview. Sign in after installation.",
+      "visible": true,
+      "dependencies": {
+        "apt": "gnupg",
+        "dnf": "gnupg2",
+        "pacman": "gnupg"
+      },
+      "scripts": {
+        "apt": "chatgpt-apt.sh",
+        "dnf": "chatgpt-dnf.sh",
+        "pacman": "chatgpt-pacman.sh"
+      },
+      "packages": {
+        "apt": "chatgpt",
+        "dnf": "chatgpt",
+        "pacman": "chatgpt-bin"
+      }
+    },
+    {
+      "id": "claude-desktop",
+      "name": "Claude Desktop",
+      "description": "Official Linux beta. Sign in after installation.",
+      "visible": true,
+      "dependencies": {
+        "apt": "gnupg"
+      },
+      "scripts": {
+        "apt": "claude-desktop-apt.sh"
+      },
+      "packages": {
+        "apt": "claude-desktop"
+      }
+    }
+  ],
+  "presetDependencies": {
+    "apk": "curl ca-certificates",
+    "apt": "curl ca-certificates diffutils",
+    "dnf": "curl ca-certificates diffutils",
+    "pacman": "curl ca-certificates diffutils"
+  }
+}

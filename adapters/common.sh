@@ -130,7 +130,7 @@ partition_path()
 prepare_root_disk()
 {
 	# Fail before touching the disk when the selected userspace cannot run.
-	if selected x86_64 || selected wine || selected amd64-rootfs; then
+	if selected x86_64 || selected amd64-rootfs; then
 		/bin/sh "$PAYLOAD_ROOT/rosetta.sh" || fail 'Rosetta is not ready'
 	fi
 	load_installation_account
@@ -288,10 +288,8 @@ install_guest_agent()
 install_rosetta_support()
 {
 	root=$1
-	# Wine is an amd64 Linux process and therefore needs the same translation
-	# service as a directly launched x86-64 program. Steam invokes FEXBash
-	# explicitly, so it can coexist without installing a competing binfmt entry.
-	selected x86_64 || selected wine || selected amd64-rootfs || return 0
+	# Compatibility for interrupted installations created by older releases.
+	selected x86_64 || selected amd64-rootfs || return 0
 	mkdir -p "$root/usr/libexec/nativepipe" "$root/etc/systemd/system"
 	cp "$PAYLOAD_ROOT/rosetta.sh" "$root/usr/libexec/nativepipe/mount-rosetta"
 	chmod 0755 "$root/usr/libexec/nativepipe/mount-rosetta"

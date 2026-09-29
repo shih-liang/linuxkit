@@ -7,9 +7,9 @@ from urllib.parse import urlparse
 
 root = pathlib.Path(__file__).resolve().parent
 catalog = json.loads((root / "catalog.json").read_text())
-assert catalog["schemaVersion"] == 4
+assert catalog["schemaVersion"] == 5
 assert catalog["revision"] >= 1
-required_distros = {"alpine", "debian", "ubuntu", "fedora", "archlinux-arm"}
+required_distros = {"alpine", "debian", "ubuntu", "fedora", "archlinux-arm", "ubuntu-amd64", "debian-amd64", "alpine-amd64", "fedora-amd64", "archlinux-amd64"}
 ids = {item["id"] for item in catalog["distributions"]}
 assert len(ids) == len(catalog["distributions"])
 assert required_distros <= ids
@@ -17,9 +17,10 @@ assert required_distros <= ids
 all_software = set()
 for distro in catalog["distributions"]:
     assert re.fullmatch(r"[a-z0-9][a-z0-9._-]*", distro["id"])
-    assert distro["architecture"] == "arm64"
+    assert distro["architecture"] in {"arm64", "amd64"}
+    assert "amd64Source" not in distro
     assert distro["adapter"] == "nativepipe-install"
-    assert distro["format"] in {"tar", "oci"}
+    assert distro["format"] in {"tar", "oci", "arch-bootstrap"}
     assert pathlib.PurePath(distro["adapter"]).name == distro["adapter"]
     assert "version" not in distro and "rootfs" not in distro
     boot_arguments = distro["bootArguments"]
@@ -57,14 +58,21 @@ for distro in catalog["distributions"]:
     assert all(re.fullmatch(r"[a-z0-9][a-z0-9._-]*", item) for item in software)
     all_software |= software
 
-assert {"steam", "x86_64", "wine"} <= all_software
-ubuntu = next(item for item in catalog["distributions"] if item["id"] == "ubuntu")
-ubuntu_software = {item["id"]: item for item in ubuntu["software"]}
-assert ubuntu_software["wine"].get("requiresRosetta") is True
-assert ubuntu_software["amd64-rootfs"].get("requiresRosetta") is True
-amd64 = ubuntu["amd64Source"]
-assert amd64["checksumAlgorithm"] == "sha256"
-assert amd64["indexURL"] == ubuntu["source"]["indexURL"]
-assert amd64["versionSeries"] == ubuntu["source"]["versionSeries"]
-assert amd64["artifactPattern"] == ubuntu["source"]["artifactPattern"].replace("arm64", "amd64")
+subprocess.run(["python3", str(root / "sync-apps.py")], check=True)
+policies = {"alpine", "debian", "ubuntu", "fedora", "archlinux-arm", "archlinux"}
+for distro in catalog["distributions"]:
+    policy = distro.get("installerDistribution", distro["id"])
+    assert policy in policies
+    expected_format = "oci" if policy == "fedora" else "arch-bootstrap" if policy == "archlinux" else "tar"
+    assert distro["format"] == expected_format
+    assert policy != "archlinux-arm" or distro["architecture"] == "arm64"
+    assert policy != "archlinux" or distro["architecture"] == "amd64"
+    if distro["source"]["kind"] == "debianOCI":
+        branch = "dist-amd64" if distro["architecture"] == "amd64" else "dist-arm64v8"
+        assert distro["source"]["indexURL"].endswith("/" + branch)
+for name in ["ubuntu", "debian", "fedora", "alpine"]:
+    native = next(item for item in catalog["distributions"] if item["id"] == name)
+    amd64 = next(item for item in catalog["distributions"] if item["id"] == name + "-amd64")
+    assert amd64["architecture"] == "amd64" and amd64["installerDistribution"] == name
+    assert amd64["source"]["versionSeries"] == native["source"]["versionSeries"]
 print(f"validated {len(catalog['distributions'])} C installer sources with approved release series")

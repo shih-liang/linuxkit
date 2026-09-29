@@ -1,3 +1,4 @@
+.DEFAULT_GOAL := all
 CC ?= cc
 PYTHON ?= python3
 PKG_CONFIG ?= pkg-config
@@ -5,25 +6,30 @@ BUILD ?= ../build/installer
 FILE_RPC_DIR ?= $(abspath ../../../nativepipe/common/file_rpc)
 CFLAGS ?= -O2 -g
 CHECK_FLAGS := -std=c11 -Wall -Wextra -Werror -UNDEBUG
-INCLUDES := -I. -I../common -I$(FILE_RPC_DIR)
+INCLUDES := -I$(BUILD) -I. -I../common -I$(FILE_RPC_DIR)
 ARCHIVE_FLAGS = $(shell $(PKG_CONFIG) --cflags libarchive json-c libcrypto)
 ARCHIVE_LIBS = $(shell $(PKG_CONFIG) --libs libarchive json-c libcrypto)
 COMMON := ../common/np.c $(FILE_RPC_DIR)/np_file_wire.c
 ROOT := ../common/root.c
 ROOT_HEADER := ../common/root.h
+APPS := apps.c apps.h packages.c $(BUILD)/applications.inc
+
+$(BUILD)/applications.inc: applications.json embed-apps.py $(wildcard presets/*.sh)
+	$(PYTHON) embed-apps.py $@
 
 .PHONY: all test test-root
 
 all: $(BUILD)/nativepipe-install
 
-$(BUILD)/nativepipe-install: nativepipe-install.c configure.c software.c amd64.c install.h distro.c distro.h $(ROOT) $(ROOT_HEADER) rootfs.c rootfs.h ../common/os_release.c ../common/os_release.h ../common/rosetta.c ../common/rosetta.h $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
+$(BUILD)/nativepipe-install: nativepipe-install.c configure.c $(APPS) install.h distro.c distro.h $(ROOT) $(ROOT_HEADER) rootfs.c rootfs.h ../common/os_release.c ../common/os_release.h ../common/rosetta.c ../common/rosetta.h $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) $(ARCHIVE_FLAGS) \
-		nativepipe-install.c configure.c software.c amd64.c distro.c $(ROOT) rootfs.c \
+		nativepipe-install.c configure.c apps.c packages.c distro.c $(ROOT) rootfs.c \
 		../common/os_release.c ../common/rosetta.c $(COMMON) $(FILE_RPC_DIR)/np_file_server.c \
 		$(LDFLAGS) $(ARCHIVE_LIBS) -o $@
 
-test: $(BUILD)/policy-test $(BUILD)/rootfs-extract
+test: $(BUILD)/policy-test $(BUILD)/rootfs-extract $(BUILD)/applications.inc
+	@for script in presets/*.sh; do sh -n "$$script" || exit 1; done
 	$(BUILD)/policy-test
 	$(PYTHON) tests/rootfs_test.py $(BUILD)/rootfs-extract
 
@@ -44,17 +50,22 @@ $(BUILD)/root-test: tests/root_test.c $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RP
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) -static tests/root_test.c $(ROOT) \
 		$(COMMON) $(FILE_RPC_DIR)/np_file_server.c -o $@
 
-$(BUILD)/package-test: tests/package_test.c configure.c software.c ../common/os_release.c install.h distro.c distro.h $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
+$(BUILD)/package-test: tests/package_test.c configure.c packages.c ../common/os_release.c install.h distro.c distro.h $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) -static tests/package_test.c configure.c software.c ../common/os_release.c distro.c $(ROOT) \
+	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) -static tests/package_test.c configure.c packages.c ../common/os_release.c distro.c $(ROOT) \
 		$(COMMON) $(FILE_RPC_DIR)/np_file_server.c -o $@
 
-test-root: $(BUILD)/root-test $(BUILD)/package-test $(BUILD)/nativepipe-install
+test-root: $(BUILD)/root-test $(BUILD)/package-test $(BUILD)/apps-test $(BUILD)/nativepipe-install
 	$(BUILD)/root-test
 	$(BUILD)/package-test
+	$(BUILD)/apps-test
 	$(PYTHON) tests/preflight_test.py $(BUILD)/nativepipe-install
 
 $(BUILD)/run-root: tests/run-root.c $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) -D_DEFAULT_SOURCE $(INCLUDES) tests/run-root.c $(ROOT) \
 		$(COMMON) $(FILE_RPC_DIR)/np_file_server.c -o $@
+
+$(BUILD)/apps-test: tests/apps_test.c $(APPS) distro.c distro.h $(ROOT) $(ROOT_HEADER) ../common/os_release.c $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) -static tests/apps_test.c apps.c packages.c distro.c $(ROOT) ../common/os_release.c $(COMMON) $(FILE_RPC_DIR)/np_file_server.c -o $@

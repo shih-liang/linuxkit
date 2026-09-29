@@ -137,6 +137,17 @@ static int extract_tar(int fd, const char *prefix, int layer, int envelope) {
             if (prefix && *prefix) {
                 size_t n = strlen(prefix);
                 if (strncmp(raw, prefix, n) || (raw[n] && raw[n] != '/')) {
+                    /* Official Arch bootstrap archives also carry two
+                     * publisher metadata files beside root.x86_64. They are
+                     * not part of the installed root. Do not generalize this
+                     * exception to arbitrary sibling paths or links. */
+                    if ((!strcmp(raw, "version") || !strcmp(raw, "pkglist.x86_64.txt")) &&
+                        archive_entry_filetype(entry) == AE_IFREG &&
+                        !archive_entry_hardlink(entry) && !archive_entry_symlink(entry) &&
+                        archive_entry_size(entry) >= 0 && archive_entry_size(entry) <= MAX_JSON) {
+                        archive_read_data_skip(a);
+                        continue;
+                    }
                     failure("unexpected archive root"); goto done;
                 }
                 path = raw + n;

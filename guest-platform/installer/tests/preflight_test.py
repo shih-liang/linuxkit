@@ -15,10 +15,24 @@ with tempfile.TemporaryDirectory(prefix="nativepipe-preflight-") as folder:
     source = payload / "source"
     source.write_bytes(b"not an archive; no case should reach extraction")
     (payload / "account").write_text("installtest\nfixture-password\n")
-    plan = dict(installationID="a" * 32, distribution="alpine", format="tar",
+    plan = dict(installationID="a" * 32, distribution="alpine", architecture="arm64", format="tar",
                 software=[], sourceChecksum=dict(
                     algorithm="sha256", value=hashlib.sha256(source.read_bytes()).hexdigest()))
     cases = [
+        json.dumps({**plan, "architecture": "arm64\0amd64"}),
+        json.dumps({**plan, "architecture": "riscv64"}),
+        json.dumps({**plan, "distribution": "archlinux", "architecture": "arm64", "format": "arch-bootstrap"}),
+        json.dumps({**plan, "distribution": "archlinux-arm", "architecture": "amd64"}),
+        json.dumps({**plan, "distribution": "archlinux", "architecture": "amd64", "format": "tar"}),
+        json.dumps({**plan, "format": "arch-bootstrap"}),
+        json.dumps({**plan, "distribution": "fedora", "format": "tar"}),
+        json.dumps({**plan, "software": ["wine"]}),
+        json.dumps({**plan, "software": ["steam"]}),
+        json.dumps({**plan, "software": ["amd64-rootfs"]}),
+        json.dumps({**plan, "software": ["chatgpt-desktop"]}),
+        json.dumps({**plan, "software": ["claude-desktop"]}),
+        json.dumps({**plan, "software": ["claudecode", "claude-code"]}),
+        json.dumps({**plan, "software": ["codex", "curl | sh"]}),
         json.dumps(plan) + "{}",
         json.dumps({**plan, "distribution": "alpine\0ubuntu"}),
         json.dumps({**plan, "software": ["developer-tools\0anything"]}),

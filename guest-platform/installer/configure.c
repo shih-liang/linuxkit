@@ -32,129 +32,6 @@ int np_install_program(int root, const char *name, char path[256]) {
     return -1;
 }
 
-static int installation_dns(int root) {
-    int source = open("/etc/resolv.conf", O_RDONLY | O_CLOEXEC);
-    if (source < 0) return -1;
-    int rc = np_root_unlink(root, "/etc/resolv.conf");
-    if (rc == 0) rc = np_root_copy(root, "/etc/resolv.conf", source, 0644);
-    close(source);
-    return rc;
-}
-
-int np_install_package_set(struct np_install *install, int refresh, const char *names) {
-    /* Package scripts (notably systemd-resolved) may replace resolv.conf with
-     * a link into /run. Each job has a private, empty /run and no running target
-     * resolver, so restore installation DNS before every package transaction.
-     * np_install_configure installs the final boot-time link afterwards. */
-    TRY(installation_dns(install->root));
-    char *args[128], storage[8192];
-    int n = np_package_arguments(install->distribution, refresh, names, args, 126, storage, sizeof(storage));
-    if (n < 0) return -1;
-    if (install->translated && install->distribution->packages == NP_PACMAN) {
-        args[n++] = "--arch"; args[n++] = "x86_64"; args[n] = NULL;
-    } else if (install->translated && install->distribution->packages == NP_DNF) {
-        args[n++] = "--forcearch=x86_64"; args[n] = NULL;
-    }
-    return np_root_run(install->root, args, NULL, 0);
-}
-
-static int remove_unused_hardware(struct np_install *install) {
-    if (install->distribution->packages != NP_PACMAN) return 0;
-    int fd = np_file_open(install->root, "/var/lib/pacman/local", O_RDONLY | O_DIRECTORY, 0);
-    if (fd < 0) return -1;
-    DIR *directory = fdopendir(fd);
-    if (!directory) { close(fd); return -1; }
-    char storage[8192], *next = storage, *args[128] = {
-        "/usr/bin/pacman", "-R", "--noconfirm", "--nosave"
-    };
-    unsigned count = 4;
-    int result = -1;
-    for (;;) {
-        errno = 0;
-        struct dirent *entry = readdir(directory);
-        if (!entry) { if (errno) goto done; break; }
-        if (entry->d_name[0] == '.') continue;
-        char path[512], data[32768];
-        int n = snprintf(path, sizeof(path), "/var/lib/pacman/local/%s/desc", entry->d_name);
-        if (n < 0 || n >= (int)sizeof(path)) { errno = ENAMETOOLONG; goto done; }
-        if (np_root_read(install->root, path, data, sizeof(data)) < 0) {
-            if (errno == ENOTDIR || errno == ENOENT) continue;
-            goto done;
-        }
-        char *name = !strncmp(data, "%NAME%\n", 7) ? data + 7 : strstr(data, "\n%NAME%\n");
-        if (!name) { errno = EINVAL; goto done; }
-        if (name != data + 7) name += 8;
-        char *end = strchr(name, '\n');
-        if (!end) { errno = EINVAL; goto done; }
-        *end = 0;
-        if (!np_distribution_unused_hardware(install->distribution, name)) continue;
-        size_t length = strlen(name) + 1;
-        if (count + 1 >= sizeof(args) / sizeof(args[0]) ||
-            length > sizeof(storage) - (size_t)(next - storage)) { errno = E2BIG; goto done; }
-        args[count++] = next;
-        memcpy(next, name, length); next += length;
-    }
-    args[count] = NULL;
-    /* Use the package manager before refreshing repositories: no firmware
-     * download, no manual package-database edits, and no ignored dependencies.
-     * This only operates on a fresh/resumed installer-owned rootfs. */
-    result = count == 4 ? 0 : np_root_run(install->root, args, NULL, 0);
-done:
-    closedir(directory);
-    return result;
-}
-
-int np_install_packages(struct np_install *install) {
-    const struct np_distribution *d = install->distribution;
-    TRY(remove_unused_hardware(install));
-    if (d->packages == NP_APK) {
-        /* The minirootfs may enable main only. Keep its selected stable
-         * branch/mirror and enable the matching community repository. */
-        char repos[8192];
-        if (np_root_read(install->root, "/etc/apk/repositories", repos, sizeof(repos)) < 0) return -1;
-        if (!strstr(repos, "/community")) {
-            char *main = strstr(repos, "/main");
-            if (!main) { errno = EINVAL; return -1; }
-            char *start = main;
-            while (start > repos && start[-1] != '\n') start--;
-            char output[16384];
-            int n = snprintf(output, sizeof(output), "%s\n%.*s/community\n", repos, (int)(main - start), start);
-            if (n < 0 || n >= (int)sizeof(output)) return -1;
-            TRY(TEXT(install->root, "/etc/apk/repositories", output, 0644));
-        }
-    }
-    if (d->packages == NP_PACMAN) {
-        char *init[] = {"/usr/bin/pacman-key", "--init", NULL};
-        char *populate[] = {"/usr/bin/pacman-key", "--populate", install->translated ? "archlinux" : "archlinuxarm", NULL};
-        TRY(np_root_run(install->root, init, NULL, 0));
-        TRY(np_root_run(install->root, populate, NULL, 0));
-        if (install->translated)
-            TRY(TEXT(install->root, "/etc/pacman.d/mirrorlist",
-                     "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n", 0644));
-    }
-    TRY(np_install_package_set(install, 1, ""));
-    if (install->translated) {
-        const char *base = d->packages == NP_APK ? "shadow sudo ca-certificates util-linux" :
-            d->packages == NP_APT ? "passwd sudo ca-certificates util-linux locales" :
-            d->packages == NP_DNF ? "shadow-utils sudo ca-certificates util-linux" :
-            "shadow sudo ca-certificates util-linux";
-        TRY(np_install_package_set(install, 0, base));
-    } else TRY(np_install_package_set(install, 0, d->base_packages));
-    const char *desktop = d->desktop_packages;
-    if (install->translated) {
-        desktop = d->packages == NP_APT
-            ? "dbus libwayland-client0 libxkbcommon0 libgl1-mesa-dri libegl-mesa0 libgl1 libegl1 libgles2 libvulkan1 mesa-vulkan-drivers fonts-dejavu-core"
-            : d->packages == NP_APK
-            ? "dbus wayland libxkbcommon mesa-dri-gallium mesa-egl mesa-gl mesa-gles mesa-vulkan-virtio vulkan-loader font-dejavu"
-            : d->packages == NP_DNF
-            ? "dbus-daemon libwayland-client libxkbcommon mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers libglvnd-gles vulkan-loader dejavu-sans-fonts"
-            : "dbus wayland libxkbcommon mesa vulkan-virtio vulkan-icd-loader ttf-dejavu";
-    }
-    TRY(np_install_package_set(install, 0, desktop));
-    if (install->developer) TRY(np_install_package_set(install, 0, d->developer_packages));
-    return 0;
-}
-
 /* Work with the target account files, not libc's native account database. */
 static int account_fields(char *line, char *fields[7]) {
     for (unsigned i = 0; i < 7; i++) {
@@ -184,34 +61,8 @@ int np_install_account(struct np_install *install) {
     char program[256];
     if (!found) {
         TRY(np_install_program(install->root, "useradd", program));
-        char uid[32], gid[32];
-        snprintf(uid, sizeof(uid), "%u", (unsigned)install->uid);
-        if (install->translated) {
-            snprintf(gid, sizeof(gid), "%u", (unsigned)install->gid);
-            char group_entries[131072], *group_save = NULL;
-            if (np_root_read(install->root, "/etc/group", group_entries, sizeof(group_entries)) < 0) return -1;
-            int existing_gid = 0;
-            for (char *entry = strtok_r(group_entries, "\n", &group_save); entry; entry = strtok_r(NULL, "\n", &group_save)) {
-                char *field = entry, *name = strsep(&field, ":");
-                if (!strsep(&field, ":")) return -1;
-                char *number = strsep(&field, ":"), *end;
-                if (!number) return -1;
-                unsigned long value = strtoul(number, &end, 10);
-                if (*end || !*number || value > 65534) return -1;
-                if (value == install->gid) existing_gid = 1;
-                if (!strcmp(name, install->username) && value != install->gid) { errno = EEXIST; return -1; }
-            }
-            if (!existing_gid) {
-                char groupadd[256];
-                TRY(np_install_program(install->root, "groupadd", groupadd));
-                char *group[] = {groupadd, "-g", gid, install->username, NULL};
-                TRY(np_root_run(install->root, group, NULL, 0));
-            }
-        }
-        char *native[] = {program, "-m", "-U", "-s", (char *)install->distribution->shell, install->username, NULL};
-        char *translated[] = {program, "-m", "-u", uid, "-g", gid, "-s",
-                              (char *)install->distribution->shell, install->username, NULL};
-        TRY(np_root_run(install->root, install->translated ? translated : native, NULL, 0));
+        char *create[] = {program, "-m", "-U", "-s", (char *)install->distribution->shell, install->username, NULL};
+        TRY(np_root_run(install->root, create, NULL, 0));
         if (np_root_read(install->root, "/etc/passwd", entries, sizeof(entries)) < 0) return -1;
         for (line = strtok_r(entries, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
             if (account_fields(line, fields) < 0) return -1;
@@ -290,7 +141,6 @@ static int openrc_enable(int root, const char *level, const char *service) {
 
 int np_install_configure(struct np_install *install) {
     int root = install->root;
-    if (install->translated) return 0;
     TRY(TEXT(root, "/etc/hostname", "fluxwindow\n", 0644));
     TRY(TEXT(root, "/etc/fstab", "LABEL=nativepipe-root / ext4 defaults 0 1\n", 0644));
     /* Never retain an image publisher's machine identity. systemd initializes
@@ -299,6 +149,16 @@ int np_install_configure(struct np_install *install) {
     TRY(np_root_unlink(root, "/var/lib/dbus/machine-id"));
     TRY(np_root_unlink(root, "/etc/machine-id"));
     if (install->distribution->init == NP_SYSTEMD) {
+        if (!strcmp(install->architecture, "amd64")) {
+            /* Translation is a prerequisite for PID 1 and every service.
+             * systemd-binfmt globally clears handlers at start and stop;
+             * it must not own the early-boot Rosetta registration. Individual
+             * additional formats can still be registered through binfmt_misc. */
+            TRY(np_root_link(root, "/etc/systemd/system/systemd-binfmt.service", "/dev/null"));
+            /* nativepipe-init has already mounted this filesystem. An
+             * automount at the same path fails and cannot own its lifetime. */
+            TRY(np_root_link(root, "/etc/systemd/system/proc-sys-fs-binfmt_misc.automount", "/dev/null"));
+        }
         TRY(TEXT(root, "/etc/machine-id", "", 0644));
         TRY(TEXT(root, "/etc/systemd/network/20-lighthouse.network",
                  "[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\nIPv6AcceptRA=yes\n", 0644));
@@ -348,6 +208,14 @@ int np_install_configure(struct np_install *install) {
 }
 
 int np_install_guest(struct np_install *install) {
+    /* Recovery contains a static, kernel-native installer. Preserve that
+     * helper for `nativepipe-install apps`; it selects packages using the
+     * target /bin/sh ELF ABI, including amd64 roots on an ARM kernel. */
+    int executable = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    if (executable < 0) return -1;
+    int copied = np_root_copy(install->root, "/usr/sbin/nativepipe-install", executable, 0755);
+    close(executable);
+    if (copied < 0) return -1;
     const char *paths[] = {"/agent/nativepipe-guestd", "/agent/systemd/nativepipe-guestd.service", "/agent/openrc/nativepipe-guestd"};
     const char *destinations[] = {"/usr/libexec/nativepipe/nativepipe-guestd", "/etc/systemd/system/nativepipe-guestd.service", "/etc/init.d/nativepipe-guestd"};
     for (unsigned i = 0; i < 3; i++) {
@@ -360,7 +228,7 @@ int np_install_guest(struct np_install *install) {
         if (rc < 0) return -1;
     }
     TRY(TEXT(install->root, "/var/lib/nativepipe/session-user", install->username, 0644));
-    if (install->rosetta) {
+    if (install->rosetta && strcmp(install->architecture, "amd64")) {
         if (install->distribution->init == NP_SYSTEMD) {
             TRY(TEXT(install->root, "/etc/systemd/system/lighthouse-rosetta.service",
                      "[Unit]\nDescription=Mount Apple Rosetta for Linux\nBefore=nativepipe-guestd.service\n\n"

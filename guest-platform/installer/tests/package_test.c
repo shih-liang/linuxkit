@@ -30,11 +30,14 @@ static int transaction(void) {
 
 int main(int argc, char **argv) {
     if (!strcmp(argv[0], "/usr/bin/apt-get")) return transaction();
-    if (!strcmp(argv[0], "/usr/bin/dpkg")) {
-        assert(argc == 3 && !strcmp(argv[1], "--add-architecture") && !strcmp(argv[2], "amd64"));
+    if (!strcmp(argv[0], "/usr/bin/pacman-key")) {
+        if (!strcmp(argv[1], "--populate")) {
+            assert(argc == 3);
+            int bootstrap = access("/etc/pacman.d/mirrorlist", F_OK) == 0;
+            assert(!strcmp(argv[2], bootstrap ? "archlinux" : "archlinuxarm"));
+        }
         return 0;
     }
-    if (!strcmp(argv[0], "/usr/bin/pacman-key")) return 0;
     if (!strcmp(argv[0], "/usr/bin/pacman")) {
         if (!strcmp(argv[1], "-R")) {
             assert(argc == 6 && !strcmp(argv[2], "--noconfirm") && !strcmp(argv[3], "--nosave"));
@@ -53,11 +56,11 @@ int main(int argc, char **argv) {
     assert(np_root_mkdir(root, "/etc", 0755) == 0);
     int self = open("/proc/self/exe", O_RDONLY | O_CLOEXEC); assert(self >= 0);
     assert(np_root_copy(root, "/usr/bin/apt-get", self, 0755) == 0);
-    struct np_install install = {.root = root, .distribution = np_distribution_find("debian"), .developer = 1};
+    struct np_install install = {.root = root, .distribution = np_distribution_find("debian")};
     assert(np_install_packages(&install) == 0);
     char count[16];
     assert(np_root_read(root, "/.transactions", count, sizeof(count)) == 2);
-    assert(!strcmp(count, "4\n"));
+    assert(!strcmp(count, "3\n"));
     const char *names[] = {"linux-aarch64", "linux-firmware-nvidia", "linux-api-headers", "mesa", "kmod"};
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         char desc[512], path[512];
@@ -71,29 +74,14 @@ int main(int argc, char **argv) {
     assert(np_root_copy(root, "/usr/bin/pacman-key", self, 0755) == 0);
     install.distribution = np_distribution_find("archlinux-arm");
     assert(np_install_packages(&install) == 0);
-    assert(np_root_read(root, "/.transactions", count, sizeof(count)) == 2 && !strcmp(count, "8\n"));
-    assert(np_root_copy(root, "/usr/bin/dpkg", self, 0755) == 0);
+    assert(np_root_read(root, "/.transactions", count, sizeof(count)) == 2 && !strcmp(count, "6\n"));
+    install.distribution = np_distribution_find("archlinux");
+    assert(np_install_packages(&install) == 0);
+    assert(np_root_read(root, "/.transactions", count, sizeof(count)) == 2 && !strcmp(count, "9\n"));
+    char mirror[256];
+    assert(np_root_read(root, "/etc/pacman.d/mirrorlist", mirror, sizeof(mirror)) > 0);
+    assert(!strcmp(mirror, "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n"));
     close(self);
-    install.distribution = np_distribution_find("ubuntu");
-    install.wine = 1;
-    const char *mirrors[] = {"http://ports.ubuntu.com/ubuntu-ports/", "http://archive.ubuntu.com/ubuntu/"};
-    for (unsigned i = 0; i < 2; i++) {
-        const char *release = "ID=ubuntu\nVERSION_CODENAME=resolute\n";
-        assert(np_root_write(root, "/etc/os-release", release, strlen(release), 0644) == 0);
-        char original[2048], native[4096], translated[4096];
-        snprintf(original, sizeof(original),
-            "# Publisher configuration\nTypes: deb\nURIs: %s\nSuites: resolute\n"
-            "Architectures: arm64\n amd64\n\nTypes: deb\nURIs: %s\nSuites: resolute-security\n",
-            mirrors[i], mirrors[i]);
-        assert(np_root_write(root, "/etc/apt/sources.list.d/ubuntu.sources", original, strlen(original), 0644) == 0);
-        assert(np_install_software(&install) == 0);
-        assert(np_root_read(root, "/etc/apt/sources.list.d/ubuntu.sources", native, sizeof(native)) > 0);
-        assert(strstr(native, mirrors[i]) && !strstr(native, "amd64"));
-        char *first = strstr(native, "Architectures: arm64\n");
-        assert(first && strstr(first + 1, "Architectures: arm64\n"));
-        assert(np_root_read(root, "/etc/apt/sources.list.d/nativepipe-amd64.sources", translated, sizeof(translated)) > 0);
-        assert(strstr(translated, "Architectures: amd64\n") && !strstr(translated, "ports.ubuntu.com"));
-    }
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         char path[512];
         snprintf(path, sizeof(path), "/var/lib/pacman/local/%s-1.0/desc", names[i]);
@@ -105,13 +93,10 @@ int main(int argc, char **argv) {
     assert(np_root_unlink(root, "/usr/bin/pacman-key") == 0);
     assert(np_root_unlink(root, "/.hardware-removed") == 0);
     assert(np_root_unlink(root, "/usr/bin/apt-get") == 0);
-    assert(np_root_unlink(root, "/usr/bin/dpkg") == 0);
-    assert(np_root_unlink(root, "/etc/os-release") == 0);
-    assert(np_root_unlink(root, "/etc/apt/sources.list.d/ubuntu.sources") == 0);
-    assert(np_root_unlink(root, "/etc/apt/sources.list.d/nativepipe-amd64.sources") == 0);
     assert(np_root_unlink(root, "/etc/resolv.conf") == 0);
     assert(np_root_unlink(root, "/.transactions") == 0);
-    const char *directories[] = {"usr/bin", "usr", "etc/apt/sources.list.d", "etc/apt", "etc", "dev", "proc", "sys", "run/rosetta", "run",
+    assert(np_root_unlink(root, "/etc/pacman.d/mirrorlist") == 0);
+    const char *directories[] = {"usr/bin", "usr", "etc/pacman.d", "etc", "dev", "proc", "sys", "run/rosetta", "run",
         "var/lib/pacman/local", "var/lib/pacman", "var/lib", "var"};
     for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
         int rc = unlinkat(root, directories[i], AT_REMOVEDIR);
@@ -119,6 +104,6 @@ int main(int argc, char **argv) {
     }
     close(root);
     assert(rmdir(path) == 0);
-    puts("installer packages: DNS recovery; firmware removal before refresh; preserved native APT mirrors and architecture separation PASS");
+    puts("installer packages: DNS recovery; firmware removal before refresh PASS");
     return 0;
 }

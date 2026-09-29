@@ -242,6 +242,13 @@ static int has_host_environment_policy(void) {
     return have;
 }
 
+/* Resource selection follows the executable ABI, not the ARM64 kernel. */
+#if defined(__x86_64__)
+#define NP_USERSPACE_ARCH "x86_64"
+#else
+#define NP_USERSPACE_ARCH "aarch64"
+#endif
+
 static int select_environment_catalog(const uint8_t *data, size_t len,
                                       const char *profile_id,
                                       struct np_environment_policy *selected) {
@@ -250,10 +257,7 @@ static int select_environment_catalog(const uint8_t *data, size_t len,
     os_release_get("ID_LIKE", os_id_like, sizeof(os_id_like));
     os_release_get("VERSION_ID", version_id, sizeof(version_id));
     detect_init(init, sizeof(init));
-    struct utsname u;
-    memset(&u, 0, sizeof(u));
-    uname(&u);
-    snprintf(arch, sizeof(arch), "%s", u.machine[0] ? u.machine : "unknown");
+    snprintf(arch, sizeof(arch), "%s", NP_USERSPACE_ARCH);
     struct np_environment_facts facts = {
         .os_id = os_id,
         .os_id_like = os_id_like,
@@ -377,8 +381,7 @@ static void fill_guest_info(struct guest_info *gi) {
     os_release_get("ID", gi->os_id, sizeof(gi->os_id));
     os_release_get("ID_LIKE", gi->os_id_like, sizeof(gi->os_id_like));
     detect_init(gi->init_system, sizeof(gi->init_system));
-    snprintf(gi->architecture, sizeof(gi->architecture), "%s",
-             u.machine[0] ? u.machine : "unknown");
+    snprintf(gi->architecture, sizeof(gi->architecture), "%s", NP_USERSPACE_ARCH);
     struct np_environment_policy policy;
     current_environment_policy(&policy);
     snprintf(gi->environment_profile, sizeof(gi->environment_profile), "%s",

@@ -13,6 +13,9 @@ ssize_t np_root_read(int root, const char *path, char *data, size_t capacity);
 int np_root_link(int root, const char *path, const char *target);
 int np_root_unlink(int root, const char *path);
 int np_root_run(int root, char *const argv[], const void *input, size_t length);
+/* Running-system applications use the same bounded input, clean environment
+ * and descriptor closure, without remounting /run or changing service policy. */
+int np_root_run_live(char *const argv[], const void *input, size_t length);
 /* Isolate mounts and reopen the same directory in the new namespace. Returns
  * an owned descriptor; the caller still owns its original descriptor. */
 int np_root_isolate(int root);

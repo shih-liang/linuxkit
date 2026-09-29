@@ -60,6 +60,10 @@ build/host-tests/atomic-receive: common/tests/atomic_receive_test.c $(COMMON_SOU
 	@mkdir -p $(@D)
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -Icommon -I$(FILE_RPC_DIR) -o $@ $< $(COMMON_SOURCE)
 
+build/host-tests/child-cloexec: common/tests/child_cloexec_test.c $(COMMON_SOURCE) $(COMMON_HEADER)
+	@mkdir -p $(@D)
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -Icommon -I$(FILE_RPC_DIR) -o $@ $< $(COMMON_SOURCE)
+
 build/host-tests/console-config: guestd/tests/console_config_test.c guestd/console_config.c guestd/console_config.h
 	@mkdir -p $(@D)
 	$(HOST_CC) $(HOST_CFLAGS) -Iguestd -o $@ guestd/console_config.c $<
@@ -86,6 +90,7 @@ build/host-tests/exec-stream: guestd/exec_stream.c guestd/exec_stream.h guestd/t
 
 test: build/host-tests/exec-stream \
 	build/host-tests/atomic-receive \
+	build/host-tests/child-cloexec \
 	build/host-tests/console-config \
 	build/host-tests/cloud-init-config \
 	build/host-tests/environment-config \

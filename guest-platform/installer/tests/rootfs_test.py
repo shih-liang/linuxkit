@@ -101,9 +101,20 @@ class Extraction(unittest.TestCase):
 
     def test_arch_prefix(self):
         self.extract(tar([("root.x86_64/", b""), ("root.x86_64/etc/version", b"arch"),
-                          ("root.x86_64/etc/link", (tarfile.LNKTYPE, "root.x86_64/etc/version"))]), "arch")
+                          ("root.x86_64/etc/link", (tarfile.LNKTYPE, "root.x86_64/etc/version")),
+                          ("version", b"2026.09.01"), ("pkglist.x86_64.txt", b"bash 5.3")]), "arch")
         self.assertEqual((self.root / "etc/link").read_bytes(), b"arch")
         self.assertFalse((self.root / "root.x86_64").exists())
+        self.assertFalse((self.root / "version").exists())
+        self.assertFalse((self.root / "pkglist.x86_64.txt").exists())
+
+    def test_arch_metadata_must_be_small_regular_files(self):
+        for value in [(tarfile.SYMTYPE, "root.x86_64/etc/version"),
+                      (tarfile.LNKTYPE, "root.x86_64/etc/version"), b"x" * (1024 * 1024 + 1)]:
+            self.extract(tar([("version", value)]), "arch", ok=False)
+
+    def test_arch_unexpected_sibling(self):
+        self.extract(tar([("root.x86_64/etc/version", b"arch"), ("etc/extra", b"bad")]), "arch", ok=False)
 
     def test_arch_wrong_prefix(self):
         self.extract(tar([("root.aarch64/etc/version", b"wrong")]), "arch", ok=False)

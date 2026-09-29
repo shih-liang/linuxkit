@@ -1,6 +1,6 @@
 # Installation and guest ownership
 
-FluxWindow's schema-4 installation entry uses the C installer bundled inside
+FluxWindow's schema-5 installation entry uses the C installer bundled inside
 the recovery initramfs. `nativepipe-init` executes `/sbin/nativepipe-install`
 directly; the host does not create or send an installation launcher script.
 The legacy adapter protocol remains only to resume VMs created by older builds.
@@ -8,17 +8,35 @@ Keeping that compatibility path does not make it the entry for new installs.
 
 ## Boot and userspace architecture
 
-Apple Silicon VMs boot an ARM64 kernel. Native ARM64 init, guestd, session and
-compositor retain ownership of the VM's devices and host connection. A 4 KiB
-kernel is required whenever Rosetta is enabled. amd64 root filesystems provide
-translated userspace, not an x86 kernel, driver ABI or a second booted VM.
+Apple Silicon VMs boot an ARM64 kernel. The installation plan independently
+selects the root userspace ABI. Every amd64 operating-system choice uses amd64 init, guestd, session,
+compositor and distribution packages, under Rosetta on a 4 KiB ARM64 kernel.
+There is one root, one account database, and one set of services. No x86 kernel,
+driver ABI, nested environment or separate terminal transport is introduced.
 
-An amd64 environment has its own distribution packages, dynamic loader and
-account database. Only the interactive account's identity is matched to the
-native system; copying the whole native passwd/group database would overwrite
-distribution service accounts. User directories and session sockets are shared
-explicitly. ARM preloads must be removed before entering amd64; graphics hooks
-must match both the target architecture and libc.
+The ARM64 initramfs validates the init executable and its interpreter chain,
+prepares Rosetta, then switches to the amd64 root. The `/run/rosetta` mount moves
+with `/run`; binfmt's F flag pins the interpreter through the root transition.
+On amd64 roots the installer masks `systemd-binfmt.service`: its default start
+and stop operations clear all handlers, which would remove the execution path
+of PID 1 and every service. Early init owns Rosetta for the whole VM lifetime;
+additional binary formats can still be registered individually through binfmt_misc.
+Its automount unit is also masked because early init already mounted binfmt_misc.
+FluxWindow retains this initramfs after installation and selects the runtime
+publish directory by the VM's root ABI, including self-updates. Existing ARM64
+VMs with optional nested environments retain their legacy identity.
+
+Whole-root amd64 acceptance is tracked per distribution. Alpine 3.24.2 has
+passed installation, cold boot, networking, ordinary-user PTY, GTK and animated
+Vulkan display tests. The tested Ubuntu 26.04, Debian 13 and Fedora 44 systems install and
+run amd64 PID 1 and guestd, but services with `MemoryDenyWriteExecute=yes`
+terminate under Rosetta. A journald-only comparison confirmed this conflict;
+the installer does not yet change that protection. Arch also requires a
+decision about pacman's filesystem sandbox: the same kernel reports Landlock
+ABI 7 to a native ARM64 probe and ENOSYS to the identical amd64 probe under
+Rosetta. These protection exceptions have not been applied while authorization
+is pending. See FluxWindow's `docs/amd64-root-verification.md` for the complete
+matrix; successful installation is not equivalent to a usable desktop.
 
 ## Responsibilities
 
@@ -44,7 +62,7 @@ must match both the target architecture and libc.
   guest integration and runtime artifact updates. Installation requests do not
   become a second implementation of those protocols.
 * `nativepipe-session` and the compositor retain desktop, input, graphics and
-  audio ownership. The native distribution's init system supervises them.
+  audio ownership. The root distribution's init system supervises them.
 
 ## Installation operation
 
@@ -69,15 +87,17 @@ must match both the target architecture and libc.
    not copied blocks in every distribution implementation.
 7. Verify rootfs architecture, package operations, init, account and executable
    artifacts. Persist completion only after successful verification and sync.
-8. Release installation resources, then boot the native system. Runtime guestd
+8. Release installation resources, then boot the installed system. Runtime guestd
    reports readiness independently of installer completion.
 
 FluxWindow pins a copy of the bundled recovery image to the pending operation,
-next to (outside) its read-only payload. Normal boots retain the VM's selected
-kernel/initramfs pair. The payload contains `install.json`, verified source
+next to (outside) its read-only payload. ARM64 roots retain the selected
+kernel/initramfs pair. amd64 roots retain the Rosetta-ready image at
+`platform/rosetta-initramfs` for every normal boot. The payload contains
+`install.json`, verified source
 archives, account input and guest artifacts. It contains no adapter, common
 script or launch bridge. After the installed guestd connects, FluxWindow removes
-the account input and both source archives; the plan and recovery image remain
+the account input and the source archive; the plan and recovery image remain
 available for an explicit disk-resize repair.
 
 Arch's general-purpose ARM image includes a physical-machine kernel and firmware.
@@ -105,11 +125,16 @@ default shell, rather than forcing `/bin/sh`.
 "Latest" is discovered from upstream, not hardcoded as a moving archive URL.
 Each installation records an immutable version/artifact/digest selection. Arch
 Linux and Arch Linux ARM have separate publishers and release numbering; they
-must not be paired by an assumed common release string. An unavailable optional
-amd64 image must not hide an otherwise usable native release.
+must not be paired by an assumed common release string. Root architectures have
+independent catalog entries; an unavailable amd64 image must not hide a usable
+ARM64 release.
 
-Validation covers the latest stable Alpine, Debian, Ubuntu, Fedora and Arch
-families, for native ARM64 and translated amd64. Tests must include malformed
+The current install catalog covers pinned Alpine, Debian, Ubuntu, Fedora and
+Arch release series for ARM64 and amd64 as ten independent operating-system
+choices. Optional applications use the shared [application table](installer/APPLICATIONS.md)
+and compiled distribution presets. Changing the
+operating-system architecture also changes the kernel requirement and artifact
+ABI; it does not install a nested environment. Tests must include malformed
 plans/archives, interrupted installation, package failure and mount cleanup,
 then actual installation, reboot, default-shell PTY, guest communication and
 graphics. Report those results separately: archive extraction or a successful

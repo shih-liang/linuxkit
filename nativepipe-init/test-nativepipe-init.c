@@ -181,7 +181,7 @@ static int self_test(const char *program_path) {
     int root = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (root < 0)
         return 1;
-    int result = preflight_executable_at(root, self_path, 0);
+    int result = preflight_executable_at(root, self_path, 0, NP_ELF_MACHINE);
     close(root);
     if (result < 0)
         return 1;
@@ -201,14 +201,48 @@ static int self_test(const char *program_path) {
         unlink(broken_path);
         return 1;
     }
-    result = preflight_executable_at(root, broken_path, 0);
+    result = preflight_executable_at(root, broken_path, 0, NP_ELF_MACHINE);
     int saved = errno;
     close(root);
     unlink(broken_path);
     return result < 0 && saved == ENOEXEC ? 0 : 1;
 }
 
+static int test_preflight_architecture(void) {
+    char path[] = "/tmp/nativepipe-init-abi.XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return 1;
+    struct { Elf64_Ehdr header; Elf64_Phdr load; } image = {0};
+    memcpy(image.header.e_ident, ELFMAG, SELFMAG);
+    image.header.e_ident[EI_CLASS] = ELFCLASS64;
+    image.header.e_ident[EI_DATA] = ELFDATA2LSB;
+    image.header.e_ident[EI_VERSION] = EV_CURRENT;
+    image.header.e_type = ET_EXEC;
+    image.header.e_machine = EM_X86_64;
+    image.header.e_version = EV_CURRENT;
+    image.header.e_ehsize = sizeof(Elf64_Ehdr);
+    image.header.e_phentsize = sizeof(Elf64_Phdr);
+    image.header.e_phnum = 1;
+    image.header.e_phoff = sizeof(Elf64_Ehdr);
+    image.load.p_type = PT_LOAD;
+    image.load.p_filesz = image.load.p_memsz = sizeof(image);
+    int result = 1;
+    if (write_full(fd, &image, sizeof(image)) < 0 || fchmod(fd, 0755) < 0) goto done;
+    int root = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (root < 0) goto done;
+    if (preflight_executable_at(root, path, 0, EM_X86_64) == 0 &&
+        preflight_executable_at(root, path, 0, EM_AARCH64) < 0 && errno == ENOEXEC) result = 0;
+    /* A truncated segment must fail even when the architecture is accepted. */
+    if (ftruncate(fd, sizeof(image) - 1) < 0 ||
+        preflight_executable_at(root, path, 0, EM_X86_64) == 0) result = 1;
+    close(root);
+done:
+    close(fd);
+    unlink(path);
+    return result;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
-    return self_test(argv[0]) || test_recovery_shell_exit();
+    return self_test(argv[0]) || test_recovery_shell_exit() || test_preflight_architecture();
 }

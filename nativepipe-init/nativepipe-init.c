@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "np_file_rpc.h"
+#include "rosetta.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -855,7 +856,7 @@ static int mount_root(const struct np_plan *plan) {
     return -1;
 }
 
-static int preflight_executable_at(int root, const char *path, unsigned depth) {
+static int preflight_executable_at(int root, const char *path, unsigned depth, uint16_t machine) {
     if (!valid_init(path)) {
         errno = EINVAL;
         return -1;
@@ -899,7 +900,7 @@ static int preflight_executable_at(int root, const char *path, unsigned depth) {
         while (*end && *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n')
             end++;
         *end = '\0';
-        return preflight_executable_at(root, interpreter, depth + 1);
+        return preflight_executable_at(root, interpreter, depth + 1, machine);
     }
     if (count != (ssize_t)sizeof(header) || memcmp(header, ELFMAG, SELFMAG) != 0 ||
         header[EI_CLASS] != ELFCLASS64 || header[EI_DATA] != ELFDATA2LSB ||
@@ -912,7 +913,7 @@ static int preflight_executable_at(int root, const char *path, unsigned depth) {
     Elf64_Ehdr executable;
     memcpy(&executable, header, sizeof(executable));
     if ((executable.e_type != ET_EXEC && executable.e_type != ET_DYN) ||
-        executable.e_machine != NP_ELF_MACHINE || executable.e_version != EV_CURRENT ||
+        executable.e_machine != machine || executable.e_version != EV_CURRENT ||
         executable.e_ehsize != sizeof(Elf64_Ehdr) ||
         executable.e_phentsize != sizeof(Elf64_Phdr) || !executable.e_phnum ||
         executable.e_phnum > 128 || executable.e_phoff > (uint64_t)status.st_size) {
@@ -969,14 +970,24 @@ static int preflight_executable_at(int root, const char *path, unsigned depth) {
         errno = ENOEXEC;
         return -1;
     }
-    return interpreter[0] ? preflight_executable_at(root, interpreter, depth + 1) : 0;
+    return interpreter[0] ? preflight_executable_at(root, interpreter, depth + 1, machine) : 0;
 }
 
 static int preflight_target_init(const struct np_plan *plan) {
     int root = open(NP_NEW_ROOT, O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (root < 0)
         return -1;
-    int result = preflight_executable_at(root, plan->init, 0);
+    int result = preflight_executable_at(root, plan->init, 0, NP_ELF_MACHINE);
+#if defined(__aarch64__)
+    if (result < 0 && errno == ENOEXEC &&
+        preflight_executable_at(root, plan->init, 0, EM_X86_64) == 0) {
+        /* Validate the entire amd64 interpreter chain before changing binfmt.
+         * /run (including the read-only Rosetta mount) moves into the new root;
+         * the F registration pins the interpreter across switch_root. */
+        result = np_rosetta_prepare();
+        if (result < 0) perror("nativepipe-init: prepare Rosetta for amd64 init");
+    }
+#endif
     close(root);
     return result;
 }
@@ -985,7 +996,7 @@ static int preflight_switch_root(void) {
     int root = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (root < 0)
         return -1;
-    int result = preflight_executable_at(root, "/sbin/switch_root", 0);
+    int result = preflight_executable_at(root, "/sbin/switch_root", 0, NP_ELF_MACHINE);
     close(root);
     return result;
 }

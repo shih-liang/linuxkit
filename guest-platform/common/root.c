@@ -188,7 +188,7 @@ int np_root_bind(int root, const char *path, const char *source) {
     return attach(root, path, NULL, NULL, MS_SLAVE | MS_REC, NULL);
 }
 
-int np_root_run(int root, char *const argv[], const void *input, size_t length) {
+static int run(int root, char *const argv[], const void *input, size_t length) {
     if (!argv || !argv[0] || argv[0][0] != '/' || length > 4096) { errno = EINVAL; return -1; }
     int pipefd[2];
     if (pipe2(pipefd, O_CLOEXEC) < 0) return -1;
@@ -201,6 +201,16 @@ int np_root_run(int root, char *const argv[], const void *input, size_t length) 
     pid_t owner = getpid(), child = fork();
     if (child < 0) { close(pipefd[0]); return -1; }
     if (child == 0) {
+        if (root < 0) {
+            if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0 || getppid() != owner ||
+                dup2(pipefd[0], STDIN_FILENO) < 0 || chdir("/") < 0 || np_child_cloexec() < 0) _exit(126);
+            char *const environment[] = {
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "HOME=/root", "TERM=dumb", "LC_ALL=C", "DEBIAN_FRONTEND=noninteractive", NULL,
+            };
+            execve(argv[0], argv, environment);
+            perror(argv[0]); _exit(127);
+        }
         int local_root;
         if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0 || getppid() != owner ||
             (local_root = np_root_isolate(root)) < 0 || unshare(CLONE_NEWPID) < 0) {
@@ -240,4 +250,13 @@ int np_root_run(int root, char *const argv[], const void *input, size_t length) 
     int rc = wait_child(child);
     if (rc != 0) fprintf(stderr, "nativepipe-install: %s exited with status %d\n", argv[0], rc);
     return rc;
+}
+
+int np_root_run(int root, char *const argv[], const void *input, size_t length) {
+    if (root < 0) { errno = EINVAL; return -1; }
+    return run(root, argv, input, length);
+}
+
+int np_root_run_live(char *const argv[], const void *input, size_t length) {
+    return run(-1, argv, input, length);
 }

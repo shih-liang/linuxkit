@@ -2,86 +2,6 @@
 set -eu
 . "${NP_SOURCE_PATH%/*}/common.sh"
 
-configure_amd64_wine()
-{
-	selected wine || return 0
-	. /etc/os-release
-	: "${VERSION_CODENAME:?Ubuntu rootfs has no VERSION_CODENAME}"
-	dpkg --add-architecture amd64
-
-	# Ubuntu's ARM image points at ports.ubuntu.com, which does not publish
-	# amd64 packages. Keep native packages on ubuntu-ports and obtain only the
-	# foreign architecture from the regular Ubuntu archive.
-	cat > /etc/apt/sources.list.d/ubuntu.sources <<EOF
-Types: deb
-URIs: http://ports.ubuntu.com/ubuntu-ports/
-Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports
-Components: main universe restricted multiverse
-Architectures: arm64
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-Types: deb
-URIs: http://ports.ubuntu.com/ubuntu-ports/
-Suites: $VERSION_CODENAME-security
-Components: main universe restricted multiverse
-Architectures: arm64
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-Types: deb
-URIs: http://archive.ubuntu.com/ubuntu/
-Suites: $VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-backports
-Components: main universe restricted multiverse
-Architectures: amd64
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-Types: deb
-URIs: http://security.ubuntu.com/ubuntu/
-Suites: $VERSION_CODENAME-security
-Components: main universe restricted multiverse
-Architectures: amd64
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-EOF
-}
-
-install_steam()
-{
-	selected steam || return 0
-	add-apt-repository -y ppa:fex-emu/fex
-	apt-get update
-	# Steam is launched explicitly with FEXBash below. Installing FEX's global
-	# binfmt packages would steal x86-64 Wine processes from Apple Rosetta.
-	apt-get install -y --no-install-recommends fex-emu-armv8.0
-	IFS= read -r install_user < "$PAYLOAD_ROOT/account"
-	runuser -u "$install_user" -- env HOME="/home/$install_user" \
-		XDG_DATA_HOME="/home/$install_user/.local/share" \
-		FEXRootFSFetcher -y -a --distro-name Ubuntu \
-		--distro-version 24.04 --distro-list-first
-	steam_deb=/var/tmp/steam-launcher.deb
-	curl --fail --location --retry 5 \
-		https://repo.steampowered.com/steam/archive/stable/steam-launcher_latest_all.deb \
-		-o "$steam_deb"
-	dpkg-deb --extract "$steam_deb" /
-	rm -f "$steam_deb" /usr/share/applications/steam.desktop
-	mkdir -p /usr/local/bin /usr/share/applications
-	cat > /usr/local/bin/lighthouse-steam <<'EOF'
-#!/bin/sh
-export STEAMOS=1 STEAM_RUNTIME=1
-exec FEXBash -c steam "$@"
-EOF
-	chmod 0755 /usr/local/bin/lighthouse-steam
-	cat > /usr/share/applications/lighthouse-steam.desktop <<'EOF'
-[Desktop Entry]
-Name=Steam
-Comment=Steam through FEX x86 emulation
-Exec=/usr/local/bin/lighthouse-steam %U
-Icon=steam
-Terminal=false
-Type=Application
-Categories=Game;
-MimeType=x-scheme-handler/steam;
-EOF
-}
-
 case ${1:-} in
 install)
 	prepare_root_disk
@@ -119,20 +39,14 @@ EOF
 	rm -f "$NP_TARGET_ROOT/usr/sbin/policy-rc.d"
 	;;
 software)
-	configure_amd64_wine
 	packages=
 	selected amd64-rootfs && packages="$packages schroot"
 	selected developer-tools && packages="$packages build-essential curl git"
-	# Install the x86-64 Wine process and its amd64 libraries. Rosetta handles
-	# the ELF loader; --no-install-recommends deliberately excludes wine32/i386.
-	selected wine && packages="$packages wine wine64:amd64"
-	selected steam && packages="$packages curl software-properties-common"
 	export DEBIAN_FRONTEND=noninteractive
 	if [ -n "$packages" ]; then
 		apt-get update
 		apt-get install -y --no-install-recommends $packages
 	fi
-	install_steam
 	if selected amd64-rootfs; then /bin/sh "$PAYLOAD_ROOT/amd64-rootfs.sh"; fi
 	;;
 repair)

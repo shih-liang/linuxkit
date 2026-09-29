@@ -13,7 +13,10 @@ struct np_distribution {
     const char *shell;
     const char *base_packages;
     const char *desktop_packages;
-    const char *developer_packages;
+    /* NULL architecture means the same package policy supports both ABIs. */
+    const char *architecture;
+    enum np_rootfs_format rootfs_format;
+    const char *pacman_keyring;
 };
 
 const struct np_distribution *np_distribution_find(const char *id);
