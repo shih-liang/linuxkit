@@ -124,8 +124,9 @@ exists.
 
 ## Independent GitHub builds
 
-`kernel-image.yml` builds only the ARM64 16 KiB kernel and its configuration,
-symbols and module ABI files. `build-initramfs.yml` independently builds and
+`kernel-image.yml` builds ARM64 16 KiB and Rosetta-compatible 4 KiB kernels in
+parallel, with separate configurations, symbols and module ABI files. Both use
+`config-aarch64`; the 4 KiB build applies `config-rosetta-aarch64` last. `build-initramfs.yml` independently builds and
 tests the static recovery tools; it does not download or compile Linux. Either
 workflow can be run manually to obtain its own Actions artifact.
 

@@ -1,4 +1,4 @@
-name: Build ARM64 16 KiB kernel Image
+name: Build ARM64 kernels
 
 on:
   workflow_call:
@@ -21,6 +21,12 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        page_size: [16, 4]
+    env:
+      PAGE_SIZE: ${{ matrix.page_size }}
     steps:
       - name: Check out configuration
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -50,17 +56,30 @@ jobs:
             cat DEPENDENCY_VERSIONS
           } >> "$GITHUB_ENV"
 
-      - name: Reuse verified kernel release
+      - name: Select reuse by page size
         if: inputs.reuse_release != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           KERNEL_RELEASE: ${{ inputs.reuse_release }}
         run: |
-          bash scripts/reuse-kernel-release.sh "$KERNEL_RELEASE"
+          set -euo pipefail
+          gh release view "$KERNEL_RELEASE" --json assets --jq '.assets[].name' > release-assets.txt
+          if grep -Fxq "lighthouse-linux-${KERNEL_VERSION}-arm64-${PAGE_SIZE}k.Image" release-assets.txt; then
+            echo 'REUSE_KERNEL=true' >> "$GITHUB_ENV"
+          fi
+
+      - name: Reuse verified kernel release
+        if: env.REUSE_KERNEL == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KERNEL_RELEASE: ${{ inputs.reuse_release }}
+        run: |
+          bash scripts/reuse-kernel-release.sh "$KERNEL_RELEASE" "$PAGE_SIZE"
 
       - name: Install kernel build dependencies
-        if: inputs.reuse_release == ''
+        if: env.REUSE_KERNEL != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -68,7 +87,7 @@ jobs:
             libc6-dev-arm64-cross libelf-dev libssl-dev pahole rsync xz-utils
 
       - name: Download and verify Linux source
-        if: inputs.reuse_release == ''
+        if: env.REUSE_KERNEL != 'true'
         run: |
           set -eu
           major="${KERNEL_VERSION%%.*}"
@@ -106,7 +125,7 @@ jobs:
       - name: Merge Kata ARM64 and FluxWindow configuration
         env:
           GH_TOKEN: ${{ github.token }}
-        if: inputs.reuse_release == ''
+        if: env.REUSE_KERNEL != 'true'
         run: |
           set -euo pipefail
           kernel_tree="linux-${KERNEL_VERSION}"
@@ -129,14 +148,16 @@ jobs:
           mapfile -t arm64_configs < <(find "$fragments/arm64" -maxdepth 1 -name '*.conf' -print | sort)
           test "${#common_configs[@]}" -gt 0
           test "${#arm64_configs[@]}" -gt 0
+          overlays=("$GITHUB_WORKSPACE/config-aarch64")
+          if [ "$PAGE_SIZE" = 4 ]; then overlays+=("$GITHUB_WORKSPACE/config-rosetta-aarch64"); fi
           (
             cd "$kernel_tree"
             scripts/kconfig/merge_config.sh -m \
-              "${common_configs[@]}" "${arm64_configs[@]}" "$GITHUB_WORKSPACE/config-aarch64"
+              "${common_configs[@]}" "${arm64_configs[@]}" "${overlays[@]}"
           )
 
       - name: Resolve Kconfig dependencies
-        if: inputs.reuse_release == ''
+        if: env.REUSE_KERNEL != 'true'
         run: |
           set -eu
           cd "linux-${KERNEL_VERSION}"
@@ -150,7 +171,7 @@ jobs:
           # olddefconfig may otherwise silently drop a leaf whose dependency
           # changed in a newer LTS kernel.
           for setting in \
-            CONFIG_ARM64_16K_PAGES=y \
+            CONFIG_ARM64_${PAGE_SIZE}K_PAGES=y \
             CONFIG_MODULES=y \
             CONFIG_MODULE_UNLOAD=y \
             CONFIG_MODVERSIONS=y \
@@ -313,7 +334,9 @@ jobs:
               exit 1
             }
           done
-          grep -Fxq '# CONFIG_ARM64_4K_PAGES is not set' .config
+          other_page_size=4
+          if [ "$PAGE_SIZE" = 4 ]; then other_page_size=16; fi
+          grep -Fxq "# CONFIG_ARM64_${other_page_size}K_PAGES is not set" .config
           grep -Fxq '# CONFIG_MODULE_SIG is not set' .config
           grep -Fxq '# CONFIG_TRIM_UNUSED_KSYMS is not set' .config
           grep -Fxq 'CONFIG_LSM="landlock,yama,integrity,apparmor,selinux"' .config
@@ -367,14 +390,14 @@ jobs:
             "$(grep -Ec '^CONFIG_[A-Za-z0-9_]+=y$' .config)"
 
       - name: Build kernel
-        if: inputs.reuse_release == ''
+        if: env.REUSE_KERNEL != 'true'
         run: |
           cd "linux-${KERNEL_VERSION}"
           make -j"$(nproc)" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             Image modules
 
       - name: Verify external module ABI
-        if: inputs.reuse_release == ''
+        if: env.REUSE_KERNEL != 'true'
         run: |
           set -eu
           module_dir="$PWD/module-smoke"
@@ -398,17 +421,21 @@ jobs:
             | grep -q 'Machine:.*AArch64'
 
       - name: Collect kernel output
-        if: inputs.reuse_release == ''
+        if: env.REUSE_KERNEL != 'true'
         run: |
           mkdir -p artifact
           cp "linux-${KERNEL_VERSION}/arch/arm64/boot/Image" \
-            "artifact/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image"
-          cp "linux-${KERNEL_VERSION}/.config" artifact/config-aarch64
-          cp "linux-${KERNEL_VERSION}/System.map" "linux-${KERNEL_VERSION}/Module.symvers" artifact/
+            "artifact/lighthouse-linux-${KERNEL_VERSION}-arm64-${PAGE_SIZE}k.Image"
+          suffix=""
+          if [ "$PAGE_SIZE" = 4 ]; then suffix="-4k"; fi
+          cp "linux-${KERNEL_VERSION}/.config" "artifact/config-aarch64${suffix}"
+          for file in System.map Module.symvers; do
+            cp "linux-${KERNEL_VERSION}/$file" "artifact/${file}${suffix}"
+          done
 
       - name: Upload kernel output
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lighthouse-kernel-arm64
+          name: lighthouse-kernel-${{ matrix.page_size }}k-arm64
           path: artifact/
           if-no-files-found: error

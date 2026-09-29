@@ -1,0 +1,5 @@
+# Rosetta's amd64 ELF mappings require a 4 KiB Linux page size. Apply after
+# config-aarch64; all device, security and recovery settings remain shared.
+CONFIG_ARM64_4K_PAGES=y
+# CONFIG_ARM64_16K_PAGES is not set
+# CONFIG_ARM64_64K_PAGES is not set

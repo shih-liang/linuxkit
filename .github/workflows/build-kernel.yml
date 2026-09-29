@@ -105,8 +105,11 @@ jobs:
           set -euo pipefail
           test "$(dd if="release/lighthouse-linux-${KERNEL_VERSION}-arm64-16k.Image" \
             bs=1 skip=56 count=4 2>/dev/null)" = ARMd
+          test "$(dd if="release/lighthouse-linux-${KERNEL_VERSION}-arm64-4k.Image" \
+            bs=1 skip=56 count=4 2>/dev/null)" = ARMd
+          grep -Fxq CONFIG_ARM64_4K_PAGES=y release/config-aarch64-4k
           gzip --test "release/lighthouse-initramfs-${KERNEL_VERSION}-arm64.img"
-          for file in config-aarch64 System.map Module.symvers; do
+          for file in config-aarch64 System.map Module.symvers config-aarch64-4k System.map-4k Module.symvers-4k; do
             test -s "release/$file"
           done
           python3 adapters/validate.py
@@ -114,8 +117,8 @@ jobs:
           tar --sort=name --mtime="@$source_date_epoch" \
             --owner=0 --group=0 --numeric-owner --format=gnu \
             --create --file=- -C release . | gzip --no-name --best \
-            > "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz"
-          mv "lighthouse-linux-${KERNEL_VERSION}-arm64-16k.tar.gz" release/
+            > "lighthouse-linux-${KERNEL_VERSION}-arm64.tar.gz"
+          mv "lighthouse-linux-${KERNEL_VERSION}-arm64.tar.gz" release/
           tar --sort=name --mtime="@$source_date_epoch" \
             --owner=0 --group=0 --numeric-owner --format=gnu \
             --create --file=- -C adapters . | gzip --no-name --best \
