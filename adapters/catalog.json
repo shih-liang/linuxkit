@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 2,
-  "revision": 3,
+  "schemaVersion": 4,
+  "revision": 7,
   "distributions": [
     {
       "id": "ubuntu",
@@ -8,7 +8,7 @@
       "summary": "Ubuntu Base published by Canonical.",
       "publisher": "Canonical",
       "architecture": "arm64",
-      "adapter": "ubuntu.sh",
+      "adapter": "nativepipe-install",
       "minimumDiskGiB": 8,
       "bootArguments": [
         "root=PARTLABEL=nativepipe-root",
@@ -19,13 +19,14 @@
       "source": {
         "kind": "directory",
         "indexURL": "https://cdimage.ubuntu.com/ubuntu-base/releases/",
-        "minimumVersion": "24.04",
+        "minimumVersion": "26.04",
         "maximumItems": 32,
         "releasePattern": "^([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)/$",
         "releaseSubpath": "release/",
         "artifactPattern": "^ubuntu-base-([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)-base-arm64\\.tar\\.gz$",
         "checksumAlgorithm": "sha256",
-        "checksumFile": "SHA256SUMS"
+        "checksumFile": "SHA256SUMS",
+        "versionSeries": "26.04"
       },
       "software": [
         {
@@ -50,8 +51,29 @@
           "name": "Steam (Experimental)",
           "description": "Installs FEX x86 emulation and the Steam launcher for ARM64 Linux.",
           "experimental": true
+        },
+        {
+          "id": "amd64-rootfs",
+          "name": "Ubuntu amd64 Environment",
+          "description": "A separate Ubuntu amd64 filesystem and package manager using Rosetta. Shares your home, terminal, and application session with the ARM64 system. Uses the 4 KiB Rosetta kernel.",
+          "category": "Compatibility",
+          "requiresRosetta": true
         }
-      ]
+      ],
+      "amd64Source": {
+        "kind": "directory",
+        "indexURL": "https://cdimage.ubuntu.com/ubuntu-base/releases/",
+        "minimumVersion": "26.04",
+        "maximumItems": 32,
+        "releasePattern": "^([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)/$",
+        "releaseSubpath": "release/",
+        "artifactPattern": "^ubuntu-base-([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)-base-amd64\\.tar\\.gz$",
+        "checksumAlgorithm": "sha256",
+        "checksumFile": "SHA256SUMS",
+        "versionSeries": "26.04"
+      },
+      "format": "tar",
+      "amd64Format": "tar"
     },
     {
       "id": "fedora",
@@ -59,7 +81,7 @@
       "summary": "Fedora Container Base published by the Fedora Project.",
       "publisher": "Fedora Project",
       "architecture": "arm64",
-      "adapter": "fedora.sh",
+      "adapter": "nativepipe-install",
       "minimumDiskGiB": 8,
       "bootArguments": [
         "root=PARTLABEL=nativepipe-root",
@@ -70,8 +92,10 @@
       "source": {
         "kind": "jsonArray",
         "indexURL": "https://fedoraproject.org/releases.json",
-        "allowedHosts": ["download.fedoraproject.org"],
-        "minimumVersion": "42",
+        "allowedHosts": [
+          "download.fedoraproject.org"
+        ],
+        "minimumVersion": "44",
         "maximumItems": 64,
         "artifactPattern": "^Fedora-Container-Base-Generic-([0-9]+-[0-9.]+)\\.aarch64\\.oci\\.tar\\.xz$",
         "checksumAlgorithm": "sha256",
@@ -81,7 +105,8 @@
           "arch": "aarch64",
           "variant": "Container",
           "subvariant": "Container_Base"
-        }
+        },
+        "versionSeries": "44"
       },
       "software": [
         {
@@ -95,7 +120,8 @@
           "description": "Mount and register Apple Rosetta for Linux.",
           "requiresRosetta": true
         }
-      ]
+      ],
+      "format": "oci"
     },
     {
       "id": "archlinux-arm",
@@ -103,7 +129,7 @@
       "summary": "Versioned AArch64 root filesystems from Arch Linux ARM.",
       "publisher": "Arch Linux ARM",
       "architecture": "arm64",
-      "adapter": "archlinux.sh",
+      "adapter": "nativepipe-install",
       "minimumDiskGiB": 12,
       "bootArguments": [
         "root=PARTLABEL=nativepipe-root",
@@ -114,11 +140,12 @@
       "source": {
         "kind": "directory",
         "indexURL": "https://ca.us.mirror.archlinuxarm.org/os/multi/",
-        "minimumVersion": "2024.01",
+        "minimumVersion": "2026.08",
         "maximumItems": 64,
         "artifactPattern": "^ArchLinuxARM-([0-9]{4}\\.[0-9]{2})-aarch64-rootfs\\.tar\\.gz$",
         "checksumAlgorithm": "md5",
-        "checksumSuffix": ".md5"
+        "checksumSuffix": ".md5",
+        "versionSeries": "2026.08"
       },
       "software": [
         {
@@ -132,7 +159,88 @@
           "description": "Mount and register Apple Rosetta for Linux.",
           "requiresRosetta": true
         }
-      ]
+      ],
+      "format": "tar"
+    },
+    {
+      "id": "alpine",
+      "name": "Alpine Linux",
+      "summary": "Alpine stable minirootfs with OpenRC.",
+      "publisher": "Alpine Linux",
+      "architecture": "arm64",
+      "adapter": "nativepipe-install",
+      "minimumDiskGiB": 8,
+      "bootArguments": [
+        "root=PARTLABEL=nativepipe-root",
+        "rootfstype=ext4",
+        "rw",
+        "rootwait"
+      ],
+      "source": {
+        "kind": "directory",
+        "indexURL": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/",
+        "maximumItems": 4,
+        "artifactPattern": "^alpine-minirootfs-([0-9]+\\.[0-9]+\\.[0-9]+)-aarch64\\.tar\\.gz$",
+        "checksumAlgorithm": "sha256",
+        "checksumSuffix": ".sha256",
+        "versionSeries": "3.24"
+      },
+      "software": [
+        {
+          "id": "developer-tools",
+          "name": "Developer Tools",
+          "description": "Compiler, Make, Git and curl."
+        },
+        {
+          "id": "x86_64",
+          "name": "x86-64 Compatibility",
+          "description": "Mount and register Apple Rosetta for Linux.",
+          "requiresRosetta": true
+        }
+      ],
+      "format": "tar"
+    },
+    {
+      "id": "debian",
+      "name": "Debian",
+      "summary": "Stable Debian rootfs from the Debian Docker image publisher.",
+      "publisher": "Debian / debuerreotype",
+      "architecture": "arm64",
+      "adapter": "nativepipe-install",
+      "minimumDiskGiB": 8,
+      "bootArguments": [
+        "root=PARTLABEL=nativepipe-root",
+        "rootfstype=ext4",
+        "rw",
+        "rootwait"
+      ],
+      "source": {
+        "kind": "debianOCI",
+        "indexURL": "https://api.github.com/repos/debuerreotype/docker-debian-artifacts/commits/dist-arm64v8",
+        "allowedHosts": [
+          "raw.githubusercontent.com"
+        ],
+        "maximumItems": 1,
+        "minimumVersion": "13",
+        "artifactPattern": "^(rootfs)\\.tar\\.gz$",
+        "checksumAlgorithm": "sha256",
+        "versionSeries": "13",
+        "releaseSubpath": "trixie/"
+      },
+      "software": [
+        {
+          "id": "developer-tools",
+          "name": "Developer Tools",
+          "description": "Compiler, Make, Git and curl."
+        },
+        {
+          "id": "x86_64",
+          "name": "x86-64 Compatibility",
+          "description": "Mount and register Apple Rosetta for Linux.",
+          "requiresRosetta": true
+        }
+      ],
+      "format": "tar"
     }
   ]
 }

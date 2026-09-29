@@ -13,7 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  recovery:
+    uses: ./.github/workflows/build-initramfs.yml
+
   build:
+    needs: recovery
     name: Guest platform
     runs-on: ubuntu-24.04
 
@@ -65,10 +69,18 @@ jobs:
             done
           done
 
+      - name: Download C installer recovery image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lighthouse-initramfs-arm64
+          path: .recovery
+
       - name: Collect checkout-shaped output
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p artifact-root/guest-platform/build/aarch64
+          install -m0644 .recovery/lighthouse-initramfs-*-arm64.img artifact-root/guest-platform/build/aarch64/recovery.img
           for architecture in aarch64 x86_64; do
             for program in nativepipe-bootstrap nativepipe-guestd; do
               install -Dm0755 "guest-platform/build/$architecture/$program" \
@@ -124,7 +136,11 @@ jobs:
               "$root/guest/guestd/openrc/nativepipe-guestd"
             install -m0644 guest-platform/guestd/systemd/nativepipe-guestd.service \
               "$root/guest/guestd/systemd/nativepipe-guestd.service"
-            cp -R adapters "$root/InstallAdapters"
+            mkdir -p "$root/InstallAdapters"
+            cp adapters/catalog.json "$root/InstallAdapters/"
+            if [ "$architecture" = aarch64 ]; then
+              cp .release-input/guest-platform/build/aarch64/recovery.img "$root/InstallAdapters/"
+            fi
             cp -R Resources "$root/Resources"
             cp -R LICENSES "$root/LICENSES"
             tar -C "$root" -czf "release/linuxkit-guest-$architecture.tar.gz" .

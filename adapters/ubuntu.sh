@@ -121,6 +121,7 @@ EOF
 software)
 	configure_amd64_wine
 	packages=
+	selected amd64-rootfs && packages="$packages schroot"
 	selected developer-tools && packages="$packages build-essential curl git"
 	# Install the x86-64 Wine process and its amd64 libraries. Rosetta handles
 	# the ELF loader; --no-install-recommends deliberately excludes wine32/i386.
@@ -132,6 +133,7 @@ software)
 		apt-get install -y --no-install-recommends $packages
 	fi
 	install_steam
+	if selected amd64-rootfs; then /bin/sh "$PAYLOAD_ROOT/amd64-rootfs.sh"; fi
 	;;
 repair)
 	grow_root_disk

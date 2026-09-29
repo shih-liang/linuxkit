@@ -12,6 +12,8 @@
 #include "session_stack.h"
 #include "shared_folders.h"
 #include "exec_stream.h"
+#include "os_release.h"
+#include "rosetta.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -172,26 +174,19 @@ static void os_release_get(const char *key, char *out, size_t cap) {
             continue;
         char line[512];
         while (fgets(line, sizeof(line), f)) {
-            char *eq = strchr(line, '=');
-            if (!eq)
+            if (!strchr(line, '\n') && !feof(f)) {
+                int c;
+                while ((c = fgetc(f)) != '\n' && c != EOF) {}
                 continue;
-            *eq = '\0';
-            if (strcmp(line, key) != 0)
-                continue;
-            char *val = eq + 1;
-            size_t n = strlen(val);
-            while (n > 0 && (val[n - 1] == '\n' || val[n - 1] == '\r'))
-                val[--n] = '\0';
-            if (n >= 2 && val[0] == '"' && val[n - 1] == '"') {
-                val[n - 1] = '\0';
-                val++;
             }
-            snprintf(out, cap, "%s", val);
-            fclose(f);
-            return;
+            if (np_os_release_value(line, key, out, cap) == 1) {
+                fclose(f);
+                return;
+            }
         }
         fclose(f);
     }
+    snprintf(out, cap, "unknown");
 }
 
 static void detect_init(char *out, size_t cap) {
@@ -2919,6 +2914,8 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--provision") == 0)
             return provision();
+        if (strcmp(argv[i], "--prepare-rosetta") == 0)
+            return np_rosetta_prepare() == 0 ? 0 : 1;
     }
     load_cached_environment_catalog();
     /* Also run once per guestd/catalog combination after an in-place upgrade.

@@ -119,10 +119,7 @@ jobs:
             --create --file=- -C release . | gzip --no-name --best \
             > "lighthouse-linux-${KERNEL_VERSION}-arm64.tar.gz"
           mv "lighthouse-linux-${KERNEL_VERSION}-arm64.tar.gz" release/
-          tar --sort=name --mtime="@$source_date_epoch" \
-            --owner=0 --group=0 --numeric-owner --format=gnu \
-            --create --file=- -C adapters . | gzip --no-name --best \
-            > "release/lighthouse-install-adapters-${KERNEL_VERSION}.tar.gz"
+          cp adapters/catalog.json release/installation-catalog.json
           (cd release && sha256sum * > SHA256SUMS)
           (cd release && sha256sum --check --strict SHA256SUMS)
 

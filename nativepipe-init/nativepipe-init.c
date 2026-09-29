@@ -372,7 +372,8 @@ static int decode_plan(const uint8_t *payload, size_t length, struct np_plan *pl
         return valid_root(plan->root) ? 0 : -1;
     if (!valid_token(plan->disk_identifier, 20) ||
         !valid_token(plan->payload_tag, sizeof(plan->payload_tag) - 1) ||
-        !valid_payload_path(plan->adapter) || !valid_payload_path(plan->source))
+        (strcmp(plan->adapter, "/sbin/nativepipe-install") && !valid_payload_path(plan->adapter)) ||
+        !valid_payload_path(plan->source))
         return -1;
     return !plan->root[0] || valid_root(plan->root) ? 0 : -1;
 }
@@ -625,7 +626,7 @@ static int mount_payload(const struct np_plan *plan) {
                       MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
 }
 
-static int run_adapter(const struct np_plan *plan, const char *action) {
+static int run_installation(const struct np_plan *plan, const char *action) {
     char disk[sizeof(plan->disk) + 16];
     char source[sizeof(plan->source) + 18];
     snprintf(disk, sizeof(disk), "NP_TARGET_DISK=%s", plan->disk);
@@ -635,10 +636,15 @@ static int run_adapter(const struct np_plan *plan, const char *action) {
         "NP_TARGET_ROOT=" NP_NEW_ROOT, disk, source,
         plan->automatic ? "NP_AUTOMATIC=1" : "NP_AUTOMATIC=0", NULL,
     };
-    char *const arguments[] = {
+    char *const legacy_arguments[] = {
         "/bin/sh", (char *)plan->adapter, (char *)action, NULL,
     };
-    return run(arguments, environment);
+    char *const arguments[] = {"/sbin/nativepipe-install", (char *)action, NULL};
+    /* C installer belongs to this recovery image. The payload stays noexec.
+     * v1 is retained only to resume VMs created by older FluxWindow versions. */
+    bool native = !strcmp(plan->adapter, arguments[0]);
+    logmsg(native ? "starting nativepipe-install (C installer)" : "resuming legacy installation");
+    return run(native ? arguments : legacy_arguments, environment);
 }
 
 static bool root_is_mounted(void) {
@@ -1077,8 +1083,8 @@ static int prepare_plan(struct np_plan *plan) {
         if (mount_payload(plan) < 0)
             return -1;
         const char *action = plan->action == NP_ACTION_INSTALL ? "install" : "repair";
-        if (run_adapter(plan, action) != 0) {
-            logmsg("adapter failed; waiting for another host command");
+        if (run_installation(plan, action) != 0) {
+            logmsg("installer failed; waiting for another host command");
             errno = EIO;
             return -1;
         }
@@ -1129,7 +1135,7 @@ static int append_guest_info(struct buffer *response) {
         "initramfs-1", release, "LightHouse Recovery", "1", "nativepipe-init",
     };
     const char *capabilities[] = {
-        "init.control", "init.mount", "init.execute", "init.install.rootfs.v1",
+        "init.control", "init.mount", "init.execute", "init.install.rootfs.v1", "init.install.rootfs.c.v1",
         "fs.read", "fs.stat", "fs.write", "fs.stream.v1",
     };
     for (size_t index = 0; index < sizeof(fields) / sizeof(fields[0]); index++) {

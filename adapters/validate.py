@@ -7,9 +7,9 @@ from urllib.parse import urlparse
 
 root = pathlib.Path(__file__).resolve().parent
 catalog = json.loads((root / "catalog.json").read_text())
-assert catalog["schemaVersion"] == 2
+assert catalog["schemaVersion"] == 4
 assert catalog["revision"] >= 1
-required_distros = {"ubuntu", "fedora", "archlinux-arm"}
+required_distros = {"alpine", "debian", "ubuntu", "fedora", "archlinux-arm"}
 ids = {item["id"] for item in catalog["distributions"]}
 assert len(ids) == len(catalog["distributions"])
 assert required_distros <= ids
@@ -18,7 +18,8 @@ all_software = set()
 for distro in catalog["distributions"]:
     assert re.fullmatch(r"[a-z0-9][a-z0-9._-]*", distro["id"])
     assert distro["architecture"] == "arm64"
-    assert (root / distro["adapter"]).is_file()
+    assert distro["adapter"] == "nativepipe-install"
+    assert distro["format"] in {"tar", "oci"}
     assert pathlib.PurePath(distro["adapter"]).name == distro["adapter"]
     assert "version" not in distro and "rootfs" not in distro
     boot_arguments = distro["bootArguments"]
@@ -28,6 +29,7 @@ for distro in catalog["distributions"]:
 
     source = distro["source"]
     assert not ({"value", "artifactURL", "downloadURL", "releaseURL"} & source.keys())
+    assert re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", source["versionSeries"])
     index = urlparse(source["indexURL"])
     assert index.scheme == "https" and index.hostname
     assert re.compile(source["artifactPattern"]).groups >= 1
@@ -41,6 +43,12 @@ for distro in catalog["distributions"]:
     elif source["kind"] == "jsonArray":
         assert source["urlKey"] and source["checksumKey"] and source["filters"]
         assert "checksumFile" not in source and "checksumSuffix" not in source
+    elif source["kind"] == "debianOCI":
+        assert index.hostname == "api.github.com"
+        assert index.path.startswith("/repos/debuerreotype/docker-debian-artifacts/commits/")
+        assert source["checksumAlgorithm"] == "sha256"
+        assert re.fullmatch(r"[a-z][a-z0-9-]*/", source["releaseSubpath"])
+        assert source["releaseSubpath"] not in {"stable/", "oldstable/", "testing/", "unstable/", "sid/"}
     else:
         raise AssertionError(f"unsupported release source {source['kind']}")
 
@@ -53,25 +61,10 @@ assert {"steam", "x86_64", "wine"} <= all_software
 ubuntu = next(item for item in catalog["distributions"] if item["id"] == "ubuntu")
 ubuntu_software = {item["id"]: item for item in ubuntu["software"]}
 assert ubuntu_software["wine"].get("requiresRosetta") is True
-
-# Check the bytes actually written to binfmt_misc. printf %b would emit NULs,
-# truncating the ELF match before e_machine and hijacking native ARM64 programs.
-common_adapter = (root / "common.sh").read_text()
-registration = re.search(r"printf '[^']+' ':rosetta:[^']+'", common_adapter)
-assert registration is not None
-wire = subprocess.check_output(["sh", "-c", registration.group(0)])
-assert b"\x00" not in wire, "binfmt_misc requires escaped NUL bytes"
-fields = wire.decode("ascii").strip().split(":")
-assert fields[:4] == ["", "rosetta", "M", ""]
-magic, mask = [value.encode("ascii").decode("unicode_escape").encode("latin1")
-               for value in fields[4:6]]
-assert len(magic) == len(mask) == 20
-for machine, expected in ((62, True), (183, False)):
-    for elf_type in (2, 3):
-        header = bytearray(magic)
-        header[16:18] = elf_type.to_bytes(2, "little")
-        header[18:20] = machine.to_bytes(2, "little")
-        matches = all((byte & bits) == (want & bits)
-                      for byte, want, bits in zip(header, magic, mask))
-        assert matches == expected, "Rosetta must match only x86-64 ELF files"
-print(f"validated {len(catalog['distributions'])} dynamic installation sources")
+assert ubuntu_software["amd64-rootfs"].get("requiresRosetta") is True
+amd64 = ubuntu["amd64Source"]
+assert amd64["checksumAlgorithm"] == "sha256"
+assert amd64["indexURL"] == ubuntu["source"]["indexURL"]
+assert amd64["versionSeries"] == ubuntu["source"]["versionSeries"]
+assert amd64["artifactPattern"] == ubuntu["source"]["artifactPattern"].replace("arm64", "amd64")
+print(f"validated {len(catalog['distributions'])} C installer sources with approved release series")

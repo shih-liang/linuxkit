@@ -74,6 +74,8 @@ jobs:
             build-essential bzip2 cpio gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             libncurses-dev:arm64 \
+            pkg-config libarchive-dev:arm64 libjson-c-dev:arm64 libssl-dev:arm64 \
+            libarchive-dev:amd64 libjson-c-dev:amd64 libssl-dev:amd64 \
             qemu-user xz-utils
           test -f /usr/lib/aarch64-linux-gnu/libncursesw.a
           test -f /usr/lib/aarch64-linux-gnu/libtinfo.a
@@ -231,6 +233,39 @@ jobs:
             exit 1
           fi
 
+      - name: Test the C installer
+        run: |
+          set -eu
+          rpc="$PWD/.deps/nativepipe/common/file_rpc"
+          make -C guest-platform/installer FILE_RPC_DIR="$rpc" all test
+          sudo make -C guest-platform/installer FILE_RPC_DIR="$rpc" test-root
+
+      - name: Build the static C installer into Recovery
+        run: |
+          set -eu
+          export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          make -C guest-platform/installer \
+            FILE_RPC_DIR="$PWD/.deps/nativepipe/common/file_rpc" \
+            BUILD=../build/installer-aarch64 \
+            CC="$CROSS_COMPILE"gcc \
+            CFLAGS="-O2 -D_FORTIFY_SOURCE=3" LDFLAGS=-static \
+            PKG_CONFIG="pkg-config --static" all
+          install -m0755 guest-platform/build/installer-aarch64/nativepipe-install \
+            initramfs-root/sbin/nativepipe-install
+          "$CROSS_COMPILE"strip initramfs-root/sbin/nativepipe-install
+          if "$CROSS_COMPILE"readelf -l initramfs-root/sbin/nativepipe-install | grep -q INTERP; then
+            echo 'nativepipe-install must be a static ELF.' >&2
+            exit 1
+          fi
+          notices=initramfs-root/usr/share/doc/nativepipe-install
+          mkdir -p "$notices"
+          for package in libarchive-dev libjson-c-dev libssl-dev libc6 libacl1-dev libattr1-dev libxml2-dev liblzma-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev nettle-dev; do
+            source="/usr/share/doc/$package/copyright"
+            test -f "$source" || source="/usr/share/doc/$package:arm64/copyright"
+            test -f "$source"
+            cp "$source" "$notices/$package.copyright"
+          done
+
       - name: Assemble VZ-compatible initramfs
         run: |
           set -eu
@@ -248,7 +283,7 @@ jobs:
           test -x initramfs-root/sbin/switch_root
           test -x initramfs-root/usr/share/udhcpc/default.script
           test "$(readlink initramfs-root/sbin/switch_root)" = '../bin/busybox'
-          for tool in nativepipe-init mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid sfdisk lsblk; do
+          for tool in nativepipe-init nativepipe-install mke2fs e2fsck resize2fs tune2fs dumpe2fs blkid sfdisk lsblk; do
             test -x "initramfs-root/sbin/$tool"
           done
           mkdir -p initramfs-root/dev initramfs-root/proc initramfs-root/sys \

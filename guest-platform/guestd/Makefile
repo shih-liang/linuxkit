@@ -5,8 +5,8 @@
 
 ZIG ?= zig
 FILE_RPC_DIR ?= $(abspath ../../../nativepipe/common/file_rpc)
-COMMON := ../common/np.c $(FILE_RPC_DIR)/np_file_wire.c $(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c
-HEADERS := ../common/np.h $(FILE_RPC_DIR)/np_file_rpc.h exec_stream.h
+COMMON := ../common/np.c ../common/os_release.c ../common/rosetta.c $(FILE_RPC_DIR)/np_file_wire.c $(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c
+HEADERS := ../common/np.h ../common/os_release.h ../common/rosetta.h $(FILE_RPC_DIR)/np_file_rpc.h exec_stream.h
 CONSOLE := console_config.c exec_stream.c
 CLOUD_INIT := cloud_init_config.c
 ENVIRONMENT := environment_config.c

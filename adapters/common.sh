@@ -88,6 +88,10 @@ mount_target_runtime()
 		mkdir -p "$root/$path" || return 1
 		mount -o bind "/$path" "$root/$path" || return 1
 	done
+	if mountpoint -q /run/rosetta; then
+		mkdir -p "$root/run/rosetta" || return 1
+		mount -o bind /run/rosetta "$root/run/rosetta" || return 1
+	fi
 	mkdir -p "$root/etc" || return 1
 	rm -f "$root/etc/resolv.conf" && cp /etc/resolv.conf "$root/etc/resolv.conf"
 }
@@ -95,7 +99,7 @@ mount_target_runtime()
 unmount_target_runtime()
 {
 	root=$1 np_unmount_result=0
-	for path in run/nativepipe/payload sys proc dev/pts dev; do
+	for path in run/rosetta run/nativepipe/payload sys proc dev/pts dev; do
 		if mountpoint -q "$root/$path"; then
 			unmount_target "$root/$path" || np_unmount_result=1
 		fi
@@ -125,6 +129,10 @@ partition_path()
 
 prepare_root_disk()
 {
+	# Fail before touching the disk when the selected userspace cannot run.
+	if selected x86_64 || selected wine || selected amd64-rootfs; then
+		/bin/sh "$PAYLOAD_ROOT/rosetta.sh" || fail 'Rosetta is not ready'
+	fi
 	load_installation_account
 	: "${NP_TARGET_DISK:?missing NP_TARGET_DISK}"
 	: "${NP_TARGET_ROOT:?missing NP_TARGET_ROOT}"
@@ -283,21 +291,9 @@ install_rosetta_support()
 	# Wine is an amd64 Linux process and therefore needs the same translation
 	# service as a directly launched x86-64 program. Steam invokes FEXBash
 	# explicitly, so it can coexist without installing a competing binfmt entry.
-	selected x86_64 || selected wine || return 0
+	selected x86_64 || selected wine || selected amd64-rootfs || return 0
 	mkdir -p "$root/usr/libexec/nativepipe" "$root/etc/systemd/system"
-	cat > "$root/usr/libexec/nativepipe/mount-rosetta" <<'EOF'
-#!/bin/sh
-set -eu
-mkdir -p /run/rosetta /proc/sys/fs/binfmt_misc
-mountpoint -q /run/rosetta || mount -t virtiofs rosetta /run/rosetta
-[ -x /run/rosetta/rosetta ] || exit 1
-if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
-	mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
-fi
-[ -e /proc/sys/fs/binfmt_misc/rosetta ] ||
-	printf '%s\n' ':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/run/rosetta/rosetta:POCF' \
-		> /proc/sys/fs/binfmt_misc/register
-EOF
+	cp "$PAYLOAD_ROOT/rosetta.sh" "$root/usr/libexec/nativepipe/mount-rosetta"
 	chmod 0755 "$root/usr/libexec/nativepipe/mount-rosetta"
 	cat > "$root/etc/systemd/system/lighthouse-rosetta.service" <<'EOF'
 [Unit]

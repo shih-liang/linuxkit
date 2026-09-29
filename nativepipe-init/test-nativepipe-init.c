@@ -43,7 +43,17 @@ static int test_reboot(int command) {
 }
 
 static int test_execve(const char *path, char *const args[], char *const env[]) {
-    (void)env;
+    if (!strcmp(path, "/sbin/nativepipe-install")) {
+        if (!args[1] || (strcmp(args[1], "install") && strcmp(args[1], "repair")) || args[2])
+            abort();
+        bool root = false, disk = false, source = false;
+        for (unsigned i = 0; env && env[i]; i++) {
+            root |= !strcmp(env[i], "NP_TARGET_ROOT=/newroot");
+            disk |= !strcmp(env[i], "NP_TARGET_DISK=/dev/vda");
+            source |= !strcmp(env[i], "NP_SOURCE_PATH=/run/nativepipe/payload/source");
+        }
+        _exit(root && disk && source ? 23 : 24);
+    }
     if (!strcmp(path, "/bin/sh") && !strcmp(args[1], "-l"))
         _exit(shell_exit_status);
     if (!strcmp(path, "/bin/umount") && !strcmp(args[1], "-a") &&
@@ -79,6 +89,13 @@ static int test_recovery_shell_exit(void) {
 }
 
 static int self_test(const char *program_path) {
+    struct np_plan native;
+    initialize_plan(&native);
+    strcpy(native.adapter, "/sbin/nativepipe-install");
+    strcpy(native.disk, "/dev/vda");
+    strcpy(native.source, "/run/nativepipe/payload/source");
+    if (run_installation(&native, "install") != 23 ||
+        run_installation(&native, "repair") != 23) return 1;
     char device_path[] = "/tmp/nativepipe-init-dev.XXXXXX";
     if (!mkdtemp(device_path))
         return 1;
@@ -114,6 +131,19 @@ static int self_test(const char *program_path) {
         strcmp(plan.disk_identifier, "nativepipe-root") != 0 ||
         !plan.root_read_only)
         return 1;
+
+    /* The only executable outside the read-only payload allowed by an
+     * installation request is the installer built into this recovery image. */
+    struct buffer native_payload = {0};
+    const size_t adapter_offset = 16 + 2 + 15 + 2 + 2 + 18;
+    if (append(&native_payload, payload, adapter_offset) < 0 ||
+        append_string(&native_payload, "/sbin/nativepipe-install") < 0 ||
+        append_string(&native_payload, "/run/nativepipe/payload/source") < 0 ||
+        decode_plan(native_payload.bytes, native_payload.length, &plan) != 0 ||
+        strcmp(plan.adapter, "/sbin/nativepipe-install")) return 1;
+    native_payload.bytes[adapter_offset + 2] = 'x';
+    if (decode_plan(native_payload.bytes, native_payload.length, &plan) == 0) return 1;
+    free(native_payload.bytes);
 
     char valid[] =
         "console=hvc0 root=PARTUUID=1234-02 rootfstype=ext4 "

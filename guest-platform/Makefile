@@ -10,6 +10,7 @@ FILE_RPC_DIR ?= $(abspath ../../nativepipe/common/file_rpc)
 COMMON_SOURCE := common/np.c $(FILE_RPC_DIR)/np_file_wire.c
 COMMON_HEADER := common/np.h $(FILE_RPC_DIR)/np_file_rpc.h
 GUESTD_SOURCES := \
+	common/os_release.c common/rosetta.c \
 	guestd/nativepipe-guestd.c guestd/exec_stream.c \
 	guestd/console_config.c \
 	guestd/cloud_init_config.c \
@@ -18,6 +19,7 @@ GUESTD_SOURCES := \
 	guestd/shared_folders.c \
 	$(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c
 GUESTD_HEADERS := \
+	common/os_release.h common/rosetta.h \
 	guestd/console_config.h guestd/exec_stream.h \
 	guestd/cloud_init_config.h \
 	guestd/environment_config.h \
