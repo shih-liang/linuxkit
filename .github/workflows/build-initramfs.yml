@@ -234,6 +234,17 @@ jobs:
             exit 1
           fi
 
+      - name: Build and test the systemd Rosetta compatibility library
+        run: |
+          set -eu
+          make -C guest-platform/rosetta-compat all test
+          library=guest-platform/rosetta-compat/build/libnativepipe-rosetta.so
+          readelf -h "$library" | grep -q 'Machine:.*X86-64'
+          if readelf -d "$library" | grep -q '(NEEDED)'; then
+            echo 'Rosetta compatibility library must not pull in another libc.' >&2; exit 1
+          fi
+          install -Dm0755 "$library" initramfs-root/usr/libexec/nativepipe/libnativepipe-rosetta.so
+
       - name: Test the C installer
         run: |
           set -eu

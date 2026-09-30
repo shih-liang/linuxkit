@@ -72,12 +72,41 @@ int main(int argc, char **argv) {
     assert(np_root_copy(root, "/usr/bin/pacman", self, 0755) == 0);
     assert(lseek(self, 0, SEEK_SET) == 0);
     assert(np_root_copy(root, "/usr/bin/pacman-key", self, 0755) == 0);
+    const char *original = "[options]\nDownloadUser = alpm\nSigLevel = Required DatabaseOptional\n"
+        "#DisableSandboxFilesystem\n[core]\nInclude = /etc/pacman.d/mirrorlist\n";
+    assert(np_root_write(root, "/etc/pacman.conf", original, strlen(original), 0644) == 0);
+    char config[1024], configured[1024];
     install.distribution = np_distribution_find("archlinux-arm");
+    install.architecture = "arm64";
+    install.rosetta = 1; /* An optional amd64 environment does not affect ARM pacman. */
     assert(np_install_packages(&install) == 0);
     assert(np_root_read(root, "/.transactions", count, sizeof(count)) == 2 && !strcmp(count, "6\n"));
+    assert(np_root_read(root, "/etc/pacman.conf", config, sizeof(config)) > 0 && !strcmp(config, original));
     install.distribution = np_distribution_find("archlinux");
+    install.architecture = "amd64";
+    install.rosetta = 0; /* Native x86_64 retains Landlock too. */
     assert(np_install_packages(&install) == 0);
     assert(np_root_read(root, "/.transactions", count, sizeof(count)) == 2 && !strcmp(count, "9\n"));
+    assert(np_root_read(root, "/etc/pacman.conf", config, sizeof(config)) > 0 && !strcmp(config, original));
+    install.rosetta = 1;
+    assert(np_install_packages(&install) == 0);
+    assert(np_root_read(root, "/.transactions", count, sizeof(count)) == 3 && !strcmp(count, "12\n"));
+    assert(np_root_read(root, "/etc/pacman.conf", configured, sizeof(configured)) > 0);
+    assert(!strncmp(configured, original, strlen(original)));
+    assert(strstr(configured + strlen(original), "\nDisableSandboxFilesystem\n"));
+    assert(strstr(configured + strlen(original), "\nDisableSandboxSyscalls\n"));
+    assert(!strstr(configured, "\nDisableSandbox\n"));
+    assert(np_install_packages(&install) == 0);
+    assert(np_root_read(root, "/etc/pacman.conf", config, sizeof(config)) > 0 && !strcmp(config, configured));
+    /* Resuming an older installation upgrades the installer-owned
+     * filesystem-only exception without changing the distribution's config. */
+    snprintf(config, sizeof(config), "%s\n[options]\n# NativePipe: Rosetta does not implement Landlock.\nDisableSandboxFilesystem\n", original);
+    assert(np_root_write(root, "/etc/pacman.conf", config, strlen(config), 0644) == 0);
+    assert(np_install_packages(&install) == 0);
+    assert(np_root_read(root, "/etc/pacman.conf", config, sizeof(config)) > 0 && !strcmp(config, configured));
+    assert(np_root_unlink(root, "/etc/pacman.conf") == 0);
+    assert(np_install_packages(&install) < 0 && errno == ENOENT);
+    assert(np_root_read(root, "/.transactions", count, sizeof(count)) == 3 && !strcmp(count, "18\n"));
     char mirror[256];
     assert(np_root_read(root, "/etc/pacman.d/mirrorlist", mirror, sizeof(mirror)) > 0);
     assert(!strcmp(mirror, "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n"));
@@ -104,6 +133,6 @@ int main(int argc, char **argv) {
     }
     close(root);
     assert(rmdir(path) == 0);
-    puts("installer packages: DNS recovery; firmware removal before refresh PASS");
+    puts("installer packages: DNS recovery; firmware removal; scoped persistent Rosetta pacman configuration PASS");
     return 0;
 }

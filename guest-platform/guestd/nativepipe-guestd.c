@@ -1322,8 +1322,8 @@ static void prepare_graphical_session(const char *user) {
     if (np_write_file(NP_SESSION_USER_FILE, user, strlen(user), 0644) < 0)
         logmsg("could not persist graphical session user");
     apply_session_groups(user);
-    char *linger[] = {"loginctl", "enable-linger", (char *)user, NULL};
-    np_run(linger);
+    /* The session launcher prepares the systemd user manager synchronously
+     * before publishing sockets, and retries if that preparation fails. */
     ensure_session_stack();
 }
 

@@ -6,11 +6,10 @@
 ZIG ?= zig
 FILE_RPC_DIR ?= $(abspath ../../../nativepipe/common/file_rpc)
 COMMON := ../common/np.c ../common/os_release.c ../common/rosetta.c $(FILE_RPC_DIR)/np_file_wire.c $(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c
-HEADERS := ../common/np.h ../common/os_release.h ../common/rosetta.h $(FILE_RPC_DIR)/np_file_rpc.h exec_stream.h
+HEADERS := ../common/np.h ../common/fd_range.h ../common/os_release.h ../common/rosetta.h $(FILE_RPC_DIR)/np_file_rpc.h exec_stream.h
 CONSOLE := console_config.c exec_stream.c
 CLOUD_INIT := cloud_init_config.c
 ENVIRONMENT := environment_config.c
-MDEV := mdev_config.c
 SESSION_STACK := session_stack.c
 SHARED_FOLDERS := shared_folders.c
 VERSION := $(shell tr -d '[:space:]' < VERSION)
@@ -19,11 +18,10 @@ HOST_CC ?= cc
 HOST_TEST := /tmp/nativepipe-console-config-test
 HOST_CLOUD_TEST := /tmp/nativepipe-cloud-init-config-test
 HOST_ENVIRONMENT_TEST := /tmp/nativepipe-environment-config-test
-HOST_MDEV_TEST := /tmp/nativepipe-mdev-config-test
 HOST_SESSION_STACK_TEST := /tmp/nativepipe-session-stack-test
 HOST_SHARED_FOLDERS_TEST := /tmp/nativepipe-shared-folders-test
 
-.PHONY: all clean aarch64 x86_64 test test-console test-cloud-init test-environment test-mdev test-session-stack test-shared-folders
+.PHONY: all clean aarch64 x86_64 test test-console test-cloud-init test-environment test-session-stack test-shared-folders
 
 all: aarch64 x86_64
 
@@ -36,7 +34,7 @@ dist/nativepipe-guestd-aarch64: nativepipe-guestd.c $(CONSOLE) console_config.h 
 dist/nativepipe-guestd-x86_64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(SHARED_FOLDERS) shared_folders.h $(COMMON) $(HEADERS) VERSION | dist
 	$(ZIG) cc -target x86_64-linux-musl $(CFLAGS) -o $@ nativepipe-guestd.c $(CONSOLE) $(CLOUD_INIT) $(ENVIRONMENT) $(SESSION_STACK) $(SHARED_FOLDERS) $(COMMON) -lutil
 
-test: test-console test-cloud-init test-environment test-mdev test-session-stack
+test: test-console test-cloud-init test-environment test-session-stack
 
 test-console: console_config.c console_config.h tests/console_config_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I. -o $(HOST_TEST) console_config.c tests/console_config_test.c
@@ -51,11 +49,6 @@ test-environment: environment_config.c environment_config.h tests/environment_co
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I. -o $(HOST_ENVIRONMENT_TEST) \
 		environment_config.c tests/environment_config_test.c
 	$(HOST_ENVIRONMENT_TEST)
-
-test-mdev: $(MDEV) mdev_config.h tests/mdev_config_test.c
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I. -o $(HOST_MDEV_TEST) \
-		$(MDEV) tests/mdev_config_test.c
-	$(HOST_MDEV_TEST)
 
 test-session-stack: $(SESSION_STACK) session_stack.h tests/session_stack_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I. -o $(HOST_SESSION_STACK_TEST) \
@@ -75,5 +68,4 @@ clean:
 	rm -rf dist
 	rm -f $(HOST_TEST) $(HOST_CLOUD_TEST)
 	rm -f $(HOST_ENVIRONMENT_TEST)
-	rm -f $(HOST_MDEV_TEST)
 	rm -f $(HOST_SESSION_STACK_TEST)

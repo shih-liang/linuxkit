@@ -8,7 +8,7 @@ export ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
 VERSION := $(shell tr -d '[:space:]' < guestd/VERSION)
 FILE_RPC_DIR ?= $(abspath ../../nativepipe/common/file_rpc)
 COMMON_SOURCE := common/np.c $(FILE_RPC_DIR)/np_file_wire.c
-COMMON_HEADER := common/np.h $(FILE_RPC_DIR)/np_file_rpc.h
+COMMON_HEADER := common/np.h common/fd_range.h $(FILE_RPC_DIR)/np_file_rpc.h
 GUESTD_SOURCES := \
 	common/os_release.c common/rosetta.c \
 	guestd/nativepipe-guestd.c guestd/exec_stream.c \
@@ -76,10 +76,6 @@ build/host-tests/environment-config: guestd/tests/environment_config_test.c gues
 	@mkdir -p $(@D)
 	$(HOST_CC) $(HOST_CFLAGS) -Iguestd -o $@ guestd/environment_config.c $<
 
-build/host-tests/mdev-config: guestd/tests/mdev_config_test.c guestd/mdev_config.c guestd/mdev_config.h
-	@mkdir -p $(@D)
-	$(HOST_CC) $(HOST_CFLAGS) -Iguestd -o $@ guestd/mdev_config.c $<
-
 build/host-tests/session-stack: guestd/tests/session_stack_test.c guestd/session_stack.c guestd/session_stack.h
 	@mkdir -p $(@D)
 	$(HOST_CC) $(HOST_CFLAGS) -Iguestd -o $@ guestd/session_stack.c $<
@@ -94,7 +90,6 @@ test: build/host-tests/exec-stream \
 	build/host-tests/console-config \
 	build/host-tests/cloud-init-config \
 	build/host-tests/environment-config \
-	build/host-tests/mdev-config \
 	build/host-tests/session-stack
 	$(MAKE) -C $(FILE_RPC_DIR) test
 	@for test_binary in $^; do "$$test_binary" || exit $$?; done

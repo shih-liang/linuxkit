@@ -242,7 +242,46 @@ done:
     return result;
 }
 
+#if defined(__aarch64__)
+static int test_systemd_init_scope(void) {
+    char path[] = "/tmp/nativepipe-init-systemd.XXXXXX";
+    if (!mkdtemp(path)) return 1;
+    int root = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    int result = 1;
+    if (root < 0) return 1;
+    if (mkdirat(root, "usr", 0755) < 0 || mkdirat(root, "usr/lib", 0755) < 0 ||
+        mkdirat(root, "usr/lib/systemd", 0755) < 0 || mkdirat(root, "sbin", 0755) < 0) goto done;
+    int file = openat(root, "usr/lib/systemd/systemd", O_WRONLY | O_CREAT, 0755);
+    if (file < 0) goto done;
+    close(file);
+    if (symlinkat("/usr/lib/systemd/systemd", root, "sbin/init") < 0 ||
+        !is_systemd_init(root, "/sbin/init") ||
+        !is_systemd_init(root, "/usr/lib/systemd/systemd") ||
+        is_systemd_init(root, "/missing-init")) goto done;
+    if (unlinkat(root, "sbin/init", 0) < 0) goto done;
+    file = openat(root, "sbin/init", O_WRONLY | O_CREAT, 0755);
+    if (file < 0) goto done;
+    close(file);
+    /* Another init, even an executable with the same contents, must not
+     * inherit the systemd-specific compatibility environment. */
+    if (!is_systemd_init(root, "/sbin/init")) result = 0;
+done:
+    unlinkat(root, "sbin/init", 0);
+    unlinkat(root, "usr/lib/systemd/systemd", 0);
+    unlinkat(root, "sbin", AT_REMOVEDIR);
+    unlinkat(root, "usr/lib/systemd", AT_REMOVEDIR);
+    unlinkat(root, "usr/lib", AT_REMOVEDIR);
+    unlinkat(root, "usr", AT_REMOVEDIR);
+    close(root);
+    rmdir(path);
+    return result;
+}
+#endif
+
 int main(int argc, char **argv) {
     (void)argc;
+#if defined(__aarch64__)
+    if (test_systemd_init_scope()) return 1;
+#endif
     return self_test(argv[0]) || test_recovery_shell_exit() || test_preflight_architecture();
 }

@@ -55,6 +55,13 @@ launches from FluxApps. Standalone binary replacement is atomic. No additional a
   It also removes only the previously identified unused physical-machine
   packages from fresh Arch roots. Application installation on a running system
   never performs that cleanup or rewrites resolver configuration.
+  Fresh or resumed Arch amd64 installations using Rosetta persist
+  `DisableSandboxFilesystem` and `DisableSandboxSyscalls` in pacman.conf before
+  invoking pacman: Rosetta cannot install either filter. This automatic policy
+  has no UI switch or installation-plan parameter. DownloadUser and signature
+  verification remain unchanged; ARM roots and native amd64 retain both filters.
+  Later application commands use the same persisted pacman configuration.
+  Retries also upgrade the previous installer-owned filesystem-only setting.
 - `applications.json` maps names to packages, prerequisites and preset scripts.
   Its shared preset prerequisites include comparison utilities on minimal
   glibc systems; Alpine uses the corresponding BusyBox commands.
@@ -91,7 +98,12 @@ Application package installation is not transactional across multiple names.
 If a later application fails, previously installed applications stay installed;
 retry after correcting the reported error. Existing modified repository files
 are not silently replaced. Signing-key changes require a reviewed preset update.
-This work does not change the pending Rosetta/systemd or Arch Landlock policies.
+For translated systemd roots, the installer also installs the narrow syscall
+compatibility library and service settings documented in
+[`rosetta-compat/README.md`](../rosetta-compat/README.md). Pacman's automatic
+configuration separately addresses Landlock ENOSYS and seccomp EINVAL; signature
+verification and DownloadUser remain enabled. See the amd64 root verification
+report for actual installation and boot test results.
 
 ## Official installation references (checked 2026-09-30)
 

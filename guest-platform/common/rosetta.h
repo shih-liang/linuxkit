@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#define NP_ROSETTA_COMPAT_PATH "/usr/libexec/nativepipe/libnativepipe-rosetta.so"
+
 /* Shared by recovery installation and the native boot service. */
 int np_rosetta_prepare(void);
 /* Pure validation, also used by tests; never replace somebody else's handler. */

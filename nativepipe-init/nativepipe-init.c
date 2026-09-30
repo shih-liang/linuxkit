@@ -973,7 +973,21 @@ static int preflight_executable_at(int root, const char *path, unsigned depth, u
     return interpreter[0] ? preflight_executable_at(root, interpreter, depth + 1, machine) : 0;
 }
 
-static int preflight_target_init(const struct np_plan *plan) {
+#if defined(__aarch64__)
+static bool is_systemd_init(int root, const char *path) {
+    int init = np_file_open(root, path, O_RDONLY | O_CLOEXEC, 0);
+    int systemd = np_file_open(root, "/usr/lib/systemd/systemd", O_RDONLY | O_CLOEXEC, 0);
+    struct stat a, b;
+    bool same = init >= 0 && systemd >= 0 && fstat(init, &a) == 0 && fstat(systemd, &b) == 0 &&
+        a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+    if (init >= 0) close(init);
+    if (systemd >= 0) close(systemd);
+    return same;
+}
+#endif
+
+static int preflight_target_init(const struct np_plan *plan, bool *systemd_compat) {
+    *systemd_compat = false;
     int root = open(NP_NEW_ROOT, O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (root < 0)
         return -1;
@@ -986,6 +1000,14 @@ static int preflight_target_init(const struct np_plan *plan) {
          * the F registration pins the interpreter across switch_root. */
         result = np_rosetta_prepare();
         if (result < 0) perror("nativepipe-init: prepare Rosetta for amd64 init");
+        if (result == 0 && is_systemd_init(root, plan->init)) {
+            int library = np_file_open(root, NP_ROSETTA_COMPAT_PATH, O_RDONLY | O_CLOEXEC, 0);
+            if (library >= 0) {
+                close(library);
+                result = preflight_executable_at(root, NP_ROSETTA_COMPAT_PATH, 0, EM_X86_64);
+                *systemd_compat = result == 0;
+            } else if (errno != ENOENT) result = -1;
+        }
     }
 #endif
     close(root);
@@ -1058,15 +1080,20 @@ static int switch_to_root(
     stop_file_service();
     if (response_sent)
         *response_sent = false;
-    if (mount_root(plan) < 0 || preflight_target_init(plan) < 0 ||
+    bool systemd_compat;
+    if (mount_root(plan) < 0 || preflight_target_init(plan, &systemd_compat) < 0 ||
         preflight_switch_root() < 0 || prepare_runtime_mounts() < 0)
         return -1;
+    if (systemd_compat && setenv("LD_PRELOAD", NP_ROSETTA_COMPAT_PATH, 1) < 0) return -1;
     size_t moved = 0;
-    if (move_runtime_mounts(&moved) < 0)
+    if (move_runtime_mounts(&moved) < 0) {
+        if (systemd_compat) unsetenv("LD_PRELOAD");
         return -1;
+    }
     if (acknowledgement_connection >= 0) {
         if (send_ack(acknowledgement_connection, plan->request_id) < 0) {
             rollback_runtime_mounts(moved);
+            if (systemd_compat) unsetenv("LD_PRELOAD");
             return -1;
         }
         if (response_sent)
@@ -1079,6 +1106,7 @@ static int switch_to_root(
     };
     execv(arguments[0], arguments);
     int saved = errno;
+    if (systemd_compat) unsetenv("LD_PRELOAD");
     rollback_runtime_mounts(moved);
     errno = saved;
     log_errno("exec switch_root");

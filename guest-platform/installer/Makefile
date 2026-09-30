@@ -21,7 +21,7 @@ $(BUILD)/applications.inc: applications.json embed-apps.py $(wildcard presets/*.
 
 all: $(BUILD)/nativepipe-install
 
-$(BUILD)/nativepipe-install: nativepipe-install.c configure.c $(APPS) install.h distro.c distro.h $(ROOT) $(ROOT_HEADER) rootfs.c rootfs.h ../common/os_release.c ../common/os_release.h ../common/rosetta.c ../common/rosetta.h $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
+$(BUILD)/nativepipe-install: nativepipe-install.c configure.c $(APPS) install.h distro.c distro.h $(ROOT) $(ROOT_HEADER) rootfs.c rootfs.h ../common/os_release.c ../common/os_release.h ../common/rosetta.c ../common/rosetta.h $(COMMON) $(FILE_RPC_DIR)/np_file_server.c ../common/np.h ../common/fd_range.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) $(ARCHIVE_FLAGS) \
 		nativepipe-install.c configure.c apps.c packages.c distro.c $(ROOT) rootfs.c \
@@ -33,7 +33,7 @@ test: $(BUILD)/policy-test $(BUILD)/rootfs-extract $(BUILD)/applications.inc
 	$(BUILD)/policy-test
 	$(PYTHON) tests/rootfs_test.py $(BUILD)/rootfs-extract
 
-$(BUILD)/policy-test: tests/policy_test.c distro.c distro.h ../common/rosetta.c ../common/rosetta.h ../common/os_release.c ../common/os_release.h $(COMMON)
+$(BUILD)/policy-test: tests/policy_test.c distro.c distro.h ../common/rosetta.c ../common/rosetta.h ../common/os_release.c ../common/os_release.h $(COMMON) ../common/np.h ../common/fd_range.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) tests/policy_test.c distro.c \
 		../common/rosetta.c ../common/os_release.c $(COMMON) -o $@
@@ -45,12 +45,12 @@ $(BUILD)/rootfs-extract: tests/extract.c rootfs.c rootfs.h distro.h
 
 # Run only as root in a disposable Linux VM. The test binary is static so its
 # empty test root needs no distribution libraries or external shell.
-$(BUILD)/root-test: tests/root_test.c $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
+$(BUILD)/root-test: tests/root_test.c $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c ../common/np.h ../common/fd_range.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) -static tests/root_test.c $(ROOT) \
 		$(COMMON) $(FILE_RPC_DIR)/np_file_server.c -o $@
 
-$(BUILD)/package-test: tests/package_test.c configure.c packages.c ../common/os_release.c install.h distro.c distro.h $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
+$(BUILD)/package-test: tests/package_test.c configure.c packages.c ../common/os_release.c install.h distro.c distro.h $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c ../common/np.h ../common/fd_range.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) -static tests/package_test.c configure.c packages.c ../common/os_release.c distro.c $(ROOT) \
 		$(COMMON) $(FILE_RPC_DIR)/np_file_server.c -o $@
@@ -61,11 +61,11 @@ test-root: $(BUILD)/root-test $(BUILD)/package-test $(BUILD)/apps-test $(BUILD)/
 	$(BUILD)/apps-test
 	$(PYTHON) tests/preflight_test.py $(BUILD)/nativepipe-install
 
-$(BUILD)/run-root: tests/run-root.c $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
+$(BUILD)/run-root: tests/run-root.c $(ROOT) $(ROOT_HEADER) $(COMMON) $(FILE_RPC_DIR)/np_file_server.c ../common/np.h ../common/fd_range.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) -D_DEFAULT_SOURCE $(INCLUDES) tests/run-root.c $(ROOT) \
 		$(COMMON) $(FILE_RPC_DIR)/np_file_server.c -o $@
 
-$(BUILD)/apps-test: tests/apps_test.c $(APPS) distro.c distro.h $(ROOT) $(ROOT_HEADER) ../common/os_release.c $(COMMON) $(FILE_RPC_DIR)/np_file_server.c
+$(BUILD)/apps-test: tests/apps_test.c $(APPS) distro.c distro.h $(ROOT) $(ROOT_HEADER) ../common/os_release.c $(COMMON) $(FILE_RPC_DIR)/np_file_server.c ../common/np.h ../common/fd_range.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CHECK_FLAGS) $(INCLUDES) -static tests/apps_test.c apps.c packages.c distro.c $(ROOT) ../common/os_release.c $(COMMON) $(FILE_RPC_DIR)/np_file_server.c -o $@

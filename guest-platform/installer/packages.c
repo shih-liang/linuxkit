@@ -84,8 +84,49 @@ done:
     return result;
 }
 
+static int configure_pacman_sandbox(struct np_install *install) {
+    if (install->live || install->distribution->packages != NP_PACMAN ||
+        !install->rosetta || !install->architecture || strcmp(install->architecture, "amd64")) return 0;
+    /* Rosetta cannot load the download sandbox's Landlock/seccomp filters.
+     * Persist both exceptions automatically so later pacman runs use them too;
+     * DownloadUser and signatures stay unchanged.
+     * A repeated [options] section is valid pacman syntax and keeps all original
+     * settings, comments and repository sections byte-for-byte intact. */
+    static const char legacy[] = "\n[options]\n# NativePipe: Rosetta does not implement Landlock.\nDisableSandboxFilesystem\n";
+    static const char option[] = "\n[options]\n# NativePipe: Rosetta-compatible package downloads.\nDisableSandboxFilesystem\nDisableSandboxSyscalls\n";
+    char original[65536], config[65536];
+    ssize_t length = np_root_read(install->root, "/etc/pacman.conf", original, sizeof(original));
+    if (length < 0) return -1;
+    if (memchr(original, 0, (size_t)length)) { errno = EINVAL; return -1; }
+    memcpy(config, original, (size_t)length + 1);
+    /* Upgrade the earlier filesystem-only setting. Remove only our exact
+     * blocks, never user edits; retries keep one copy of the current settings. */
+    const char *owned[] = {legacy, option};
+    for (size_t i = 0; i < sizeof(owned) / sizeof(owned[0]); i++) {
+        char *found;
+        size_t size = strlen(owned[i]);
+        while ((found = strstr(config, owned[i]))) memmove(found, found + size, strlen(found + size) + 1);
+    }
+    size_t size = strlen(config);
+    if (size + sizeof(option) > sizeof(config)) { errno = EFBIG; return -1; }
+    memcpy(config + size, option, sizeof(option));
+    size += sizeof(option) - 1;
+    if (!strcmp(config, original)) return 0;
+    int etc = np_file_open(install->root, "/etc", O_RDONLY | O_DIRECTORY, 0);
+    if (etc < 0) return -1;
+    /* A failed or interrupted write must not truncate the existing config. */
+    int result = np_root_write(etc, "/.pacman.conf.nativepipe", config, size, 0644);
+    if (!result) result = renameat(etc, ".pacman.conf.nativepipe", etc, "pacman.conf");
+    int error = errno;
+    if (result) (void)unlinkat(etc, ".pacman.conf.nativepipe", 0);
+    close(etc);
+    errno = error;
+    return result;
+}
+
 int np_install_packages(struct np_install *install) {
     const struct np_distribution *d = install->distribution;
+    TRY(configure_pacman_sandbox(install));
     TRY(remove_unused_hardware(install));
     if (d->packages == NP_APK) {
         /* The minirootfs may enable main only. Keep its selected stable

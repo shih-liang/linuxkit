@@ -343,6 +343,13 @@ int main(int argc, char **argv) {
         else applications[application_count++] = name;
     }
     if (np_applications_validate(&install, applications, application_count) < 0) goto done;
+    if (install.rosetta && install.distribution->init == NP_SYSTEMD && !strcmp(install.architecture, "amd64")) {
+        int library = open(NP_ROSETTA_COMPAT_PATH, O_RDONLY | O_CLOEXEC);
+        if (library < 0) goto done;
+        int valid = verify_elf_architecture(library, "amd64");
+        close(library);
+        if (valid < 0) goto done;
+    }
     if (account(&install) < 0 || source_verified(source, checksum) < 0) goto done;
     int guest = np_file_open(install.payload, "/agent/nativepipe-guestd", O_RDONLY, 0);
     if (guest < 0) goto done;

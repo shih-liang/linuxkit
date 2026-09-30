@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #ifdef __linux__
+#include "fd_range.h"
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <sys/prctl.h>
@@ -68,6 +69,36 @@ static void check_case(const char *self, int error) {
     assert(fcntl(high, F_GETFD) == 0);
     close(pipefd[0]); close(pipefd[1]); close(high);
 }
+
+static void check_range(int error) {
+    int descriptors[3];
+    for (unsigned i = 0; i < 3; i++) {
+        descriptors[i] = open("/dev/null", O_RDONLY);
+        assert(descriptors[i] >= 3);
+    }
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        if (error) reject_close_range(error);
+        assert(np_close_range(descriptors[1], descriptors[1], 0) == 0);
+        assert(fcntl(descriptors[1], F_GETFD) < 0 && errno == EBADF);
+        assert(fcntl(descriptors[0], F_GETFD) == 0);
+        assert(fcntl(descriptors[2], F_GETFD) == 0);
+        assert(np_close_range(descriptors[2], ~0u, CLOSE_RANGE_CLOEXEC) == 0);
+        assert(fcntl(descriptors[2], F_GETFD) == FD_CLOEXEC);
+        assert(fcntl(descriptors[0], F_GETFD) == 0);
+        assert(np_close_range(10, 5, 0) < 0 && errno == EINVAL);
+        assert(np_close_range(3, ~0u, 1) < 0 && errno == EINVAL);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    for (unsigned i = 0; i < 3; i++) {
+        assert(fcntl(descriptors[i], F_GETFD) == 0);
+        close(descriptors[i]);
+    }
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -80,6 +111,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     check_case(argv[0], 0);
+    check_range(0);
     /* A translated run already exercises ENOSYS but may not implement seccomp.
      * Use --native-only for that runtime; Linux CI covers injected errors. */
     if (argc == 1) {
@@ -87,6 +119,7 @@ int main(int argc, char **argv) {
         check_case(argv[0], EINVAL);
         check_case(argv[0], EOPNOTSUPP);
         check_case(argv[0], EPERM);
+        check_range(ENOSYS);
     } else assert(argc == 2 && !strcmp(argv[1], "--native-only"));
     puts("child cloexec: stdio, sparse descriptors, exec boundary, parent isolation PASS");
 #else

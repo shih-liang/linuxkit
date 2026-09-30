@@ -2,6 +2,7 @@
 #include "install.h"
 #include "root.h"
 #include "np_file_rpc.h"
+#include "rosetta.h"
 
 #include <errno.h>
 #include <dirent.h>
@@ -149,6 +150,42 @@ int np_install_configure(struct np_install *install) {
     TRY(np_root_unlink(root, "/var/lib/dbus/machine-id"));
     TRY(np_root_unlink(root, "/etc/machine-id"));
     if (install->distribution->init == NP_SYSTEMD) {
+        if (install->rosetta && !strcmp(install->architecture, "amd64")) {
+            /* systemd's executor inherits its manager's environment. Unit
+             * payloads have a separate environment, so the library stays in
+             * the managers/executors rather than every Linux application. */
+            int library = open(NP_ROSETTA_COMPAT_PATH, O_RDONLY | O_CLOEXEC);
+            if (library < 0) return -1;
+            int copied = np_root_copy(root, NP_ROSETTA_COMPAT_PATH, library, 0755);
+            close(library);
+            TRY(copied);
+            TRY(TEXT(root, "/etc/systemd/system/user@.service.d/50-nativepipe-rosetta.conf",
+                "[Service]\nEnvironment=LD_PRELOAD=" NP_ROSETTA_COMPAT_PATH "\n", 0644));
+            TRY(TEXT(root, "/etc/systemd/user.conf.d/50-nativepipe-rosetta.conf",
+                "[Manager]\nDefaultEnvironment=LD_PRELOAD=\n", 0644));
+            /* Rosetta generates executable code while running a translated
+             * service. The kernel's MDWE restriction prevents that translation. */
+            const char *scopes[] = {"system", "user"};
+            for (unsigned i = 0; i < 2; i++) {
+                char path[256];
+                /* Distinct filename: systemd replaces equal-basename generic
+                 * drop-ins with unit-specific ones instead of merging them. */
+                snprintf(path, sizeof(path), "/etc/systemd/%s/service.d/40-nativepipe-rosetta-memory.conf", scopes[i]);
+                TRY(TEXT(root, path, "[Service]\nMemoryDenyWriteExecute=no\n", 0644));
+            }
+            /* These services also call the missing interfaces after
+             * exec. D-Bus was verified without the library once journald
+             * recovered. Do not apply a wildcard to unrelated services. */
+            const char *services[] = {
+                "systemd-journald", "systemd-userdbd", "systemd-udevd",
+                "systemd-vconsole-setup", /* Closes descriptors before loadkeys/setfont. */
+            };
+            for (unsigned i = 0; i < sizeof(services) / sizeof(services[0]); i++) {
+                char path[256];
+                snprintf(path, sizeof(path), "/etc/systemd/system/%s.service.d/50-nativepipe-rosetta.conf", services[i]);
+                TRY(TEXT(root, path, "[Service]\nEnvironment=LD_PRELOAD=" NP_ROSETTA_COMPAT_PATH "\n", 0644));
+            }
+        }
         if (!strcmp(install->architecture, "amd64")) {
             /* Translation is a prerequisite for PID 1 and every service.
              * systemd-binfmt globally clears handlers at start and stop;
