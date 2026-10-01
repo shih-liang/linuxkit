@@ -91,7 +91,6 @@ static int test_recovery_shell_exit(void) {
 static int self_test(const char *program_path) {
     struct np_plan native;
     initialize_plan(&native);
-    strcpy(native.adapter, "/sbin/nativepipe-install");
     strcpy(native.disk, "/dev/vda");
     strcpy(native.source, "/run/nativepipe/payload/source");
     if (run_installation(&native, "install") != 23 ||
@@ -122,7 +121,6 @@ static int self_test(const char *program_path) {
         15, 0, 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '-', 'r', 'o', 'o', 't',
         0, 0,
         18, 0, 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '-', 'i', 'n', 's', 't', 'a', 'l', 'l',
-        34, 0, '/', 'r', 'u', 'n', '/', 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '/', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '/', 'a', 'd', 'a', 'p', 't', 'e', 'r', '.', 's', 'h',
         30, 0, '/', 'r', 'u', 'n', '/', 'n', 'a', 't', 'i', 'v', 'e', 'p', 'i', 'p', 'e', '/', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '/', 's', 'o', 'u', 'r', 'c', 'e',
     };
     struct np_plan plan;
@@ -132,18 +130,12 @@ static int self_test(const char *program_path) {
         !plan.root_read_only)
         return 1;
 
-    /* The only executable outside the read-only payload allowed by an
-     * installation request is the installer built into this recovery image. */
-    struct buffer native_payload = {0};
-    const size_t adapter_offset = 16 + 2 + 15 + 2 + 2 + 18;
-    if (append(&native_payload, payload, adapter_offset) < 0 ||
-        append_string(&native_payload, "/sbin/nativepipe-install") < 0 ||
-        append_string(&native_payload, "/run/nativepipe/payload/source") < 0 ||
-        decode_plan(native_payload.bytes, native_payload.length, &plan) != 0 ||
-        strcmp(plan.adapter, "/sbin/nativepipe-install")) return 1;
-    native_payload.bytes[adapter_offset + 2] = 'x';
-    if (decode_plan(native_payload.bytes, native_payload.length, &plan) == 0) return 1;
-    free(native_payload.bytes);
+    /* An extra script selector is not part of the current installation plan. */
+    struct buffer invalid_payload = {0};
+    if (append(&invalid_payload, payload, sizeof(payload)) < 0 ||
+        append_string(&invalid_payload, "/run/nativepipe/payload/adapter.sh") < 0 ||
+        decode_plan(invalid_payload.bytes, invalid_payload.length, &plan) == 0) return 1;
+    free(invalid_payload.bytes);
 
     char valid[] =
         "console=hvc0 root=PARTUUID=1234-02 rootfstype=ext4 "

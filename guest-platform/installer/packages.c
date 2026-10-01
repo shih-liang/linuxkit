@@ -92,21 +92,17 @@ static int configure_pacman_sandbox(struct np_install *install) {
      * DownloadUser and signatures stay unchanged.
      * A repeated [options] section is valid pacman syntax and keeps all original
      * settings, comments and repository sections byte-for-byte intact. */
-    static const char legacy[] = "\n[options]\n# NativePipe: Rosetta does not implement Landlock.\nDisableSandboxFilesystem\n";
     static const char option[] = "\n[options]\n# NativePipe: Rosetta-compatible package downloads.\nDisableSandboxFilesystem\nDisableSandboxSyscalls\n";
     char original[65536], config[65536];
     ssize_t length = np_root_read(install->root, "/etc/pacman.conf", original, sizeof(original));
     if (length < 0) return -1;
     if (memchr(original, 0, (size_t)length)) { errno = EINVAL; return -1; }
     memcpy(config, original, (size_t)length + 1);
-    /* Upgrade the earlier filesystem-only setting. Remove only our exact
-     * blocks, never user edits; retries keep one copy of the current settings. */
-    const char *owned[] = {legacy, option};
-    for (size_t i = 0; i < sizeof(owned) / sizeof(owned[0]); i++) {
-        char *found;
-        size_t size = strlen(owned[i]);
-        while ((found = strstr(config, owned[i]))) memmove(found, found + size, strlen(found + size) + 1);
-    }
+    /* Retries keep one copy of our current settings; preserve user edits. */
+    char *found;
+    size_t option_size = strlen(option);
+    while ((found = strstr(config, option)))
+        memmove(found, found + option_size, strlen(found + option_size) + 1);
     size_t size = strlen(config);
     if (size + sizeof(option) > sizeof(config)) { errno = EFBIG; return -1; }
     memcpy(config + size, option, sizeof(option));

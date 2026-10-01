@@ -3,8 +3,6 @@
 FluxWindow's schema-5 installation entry uses the C installer bundled inside
 the recovery initramfs. `nativepipe-init` executes `/sbin/nativepipe-install`
 directly; the host does not create or send an installation launcher script.
-The legacy adapter protocol remains only to resume VMs created by older builds.
-Keeping that compatibility path does not make it the entry for new installs.
 
 ## Boot and userspace architecture
 
@@ -23,20 +21,14 @@ of PID 1 and every service. Early init owns Rosetta for the whole VM lifetime;
 additional binary formats can still be registered individually through binfmt_misc.
 Its automount unit is also masked because early init already mounted binfmt_misc.
 FluxWindow retains this initramfs after installation and selects the runtime
-publish directory by the VM's root ABI, including self-updates. Existing ARM64
-VMs with optional nested environments retain their legacy identity.
+publish directory by the VM's root ABI, including self-updates.
 
-Whole-root amd64 acceptance is tracked per distribution. Alpine 3.24.2 has
-passed installation, cold boot, networking, ordinary-user PTY, GTK and animated
-Vulkan display tests. The tested Ubuntu 26.04, Debian 13 and Fedora 44 systems install and
-run amd64 PID 1 and guestd, but services with `MemoryDenyWriteExecute=yes`
-terminate under Rosetta. A journald-only comparison confirmed this conflict;
-the installer does not yet change that protection. Arch also requires a
-decision about pacman's filesystem sandbox: the same kernel reports Landlock
-ABI 7 to a native ARM64 probe and ENOSYS to the identical amd64 probe under
-Rosetta. These protection exceptions have not been applied while authorization
-is pending. See FluxWindow's `docs/amd64-root-verification.md` for the complete
-matrix; successful installation is not equivalent to a usable desktop.
+amd64 roots require the current Rosetta adaptations: systemd's execution policy
+and scoped preload library are described in
+[`rosetta-compat/README.md`](rosetta-compat/README.md). Arch's C installer disables
+pacman filesystem and syscall sandboxing because Rosetta does not implement the
+required syscalls. These runtime requirements are independent of saved host
+configuration or installation-task formats.
 
 ## Responsibilities
 
@@ -47,7 +39,7 @@ matrix; successful installation is not equivalent to a usable desktop.
   It owns download cancellation and the unpublished VM bundle.
 * `nativepipe-init` owns recovery boot, disk identity, host installation requests
   and switching to the installed root. Distribution policy does not belong in
-  PID 1. It advertises `init.install.rootfs.c.v1` only in the recovery image
+  PID 1. It advertises `init.install.rootfs.c.v2` only in the recovery image
   shipped with the C installer.
 * `nativepipe-install` is a finite C operation. It owns disk preparation, rootfs
   extraction, package installation, initial account and service configuration,
@@ -116,7 +108,7 @@ are distinct operations.
 Installation control flow is C. The implementation must not use `system()`,
 `popen()`, shell command interpolation, or source `/etc/os-release`. Package
 maintainer scripts remain the distribution's responsibility. A short standard
-OpenRC entry or compatibility launcher may remain a script when the surrounding
+OpenRC service entry may remain a script when the surrounding
 interface requires it. Interactive sessions execute the selected account's
 default shell, rather than forcing `/bin/sh`.
 

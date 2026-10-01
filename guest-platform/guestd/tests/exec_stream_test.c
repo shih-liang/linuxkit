@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -49,8 +50,11 @@ static int start(const char *command, struct session *s, pthread_t *thread) {
 }
 static void *feed(void *data) {
     int fd = *(int *)data;
-    unsigned char block[262144]; memset(block, 0x5a, sizeof(block));
-    for (unsigned i = 0; i < 32; i++) frame(fd, 1, block, sizeof(block));
+    const size_t length = 262144;
+    unsigned char *block = malloc(length); assert(block);
+    memset(block, 0x5a, length);
+    for (unsigned i = 0; i < 32; i++) frame(fd, 1, block, (uint32_t)length);
+    free(block);
     frame(fd, 4, NULL, 0); return NULL;
 }
 static int receive(int fd, uint64_t *zeros, uint64_t *letters, unsigned *errors) {

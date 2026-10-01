@@ -1,6 +1,6 @@
 # nativepipe-init
 
-`nativepipe-init` is the static PID 1 in the LightHouse initramfs. In a normal
+`nativepipe-init` is the static PID 1 in the LinPortal initramfs. In a normal
 boot it preserves the distro's standard `root=`, `rootfstype=`, `rootflags=`,
 `ro`/`rw`, `rootwait`, `rootdelay=`, and `init=` semantics while mounting the
 target at `/newroot`, then runs `switch_root`; this successful path never
@@ -17,7 +17,7 @@ a filesystem mount failure enters recovery rather than retrying forever.
 Initialization failures also retain PID 1 and the recovery channel instead of
 exiting and causing a kernel panic.
 
-For direct LightHouse boots, the host also supplies
+For direct LinPortal boots, the host also supplies
 `nativepipe.memory_target_bytes=<bytes>`. PID 1 validates the decimal value and
 writes it to `/run/nativepipe/target-memory-bytes`; `/run` is then moved into
 the real root. The value is informational inside the guest. The host applies
@@ -44,7 +44,7 @@ recovery jobs, unmounts filesystems, syncs writes, and powers off the VM. The
 host's normal guest-stopped callback closes its windows. Closing only the
 console window is not a shell exit and does not shut down the VM.
 
-For boot/install/repair, `NPOK` is sent only after the adapter completed, the
+For boot/install/repair, `NPOK` is sent only after the C installer completed, the
 root and its ELF/script interpreter passed preflight, and all runtime mounts
 were moved successfully. Failures before that point return `NPER`; partial
 mount moves are rolled back before recovery resumes.
@@ -55,28 +55,26 @@ escape the explicitly mounted target. Absolute symlinks resolve inside that
 root, just as they do after `switch_root`. Write permission follows the mounted
 filesystem itself; PID 1 adds no separate write policy.
 
-Installer and repair adapters are data rather than compiled branches. The host
-provides a read-only virtiofs payload containing the selected adapter and its
-source, and `nativepipe-init` invokes it with a small fixed environment.
+The host provides a read-only virtiofs payload with `install.json`, verified
+rootfs archives, guest artifacts and account input. `nativepipe-init` invokes
+`/sbin/nativepipe-install` with a fixed argv and environment for installation or
+repair. It advertises `init.install.rootfs.c.v2`; the request contains the selected
+disk, payload tag and source path, with no script or executable selector.
 
-Installation catalog revision 3 requires an explicit account. The host stages
-`account` as a private, two-line data file (username, password) alongside the
-installer payload, readable only by its owner on the Mac. Adapters validate it
-before formatting, use standard `chpasswd` through stdin, and never evaluate it
-as shell source. All supported distributions use the same account setup. Fresh
-rootfs default root/user logins are locked, the chosen account receives
-password-protected sudo access, and the console uses normal login. The host
-deletes the temporary credential file when installation is acknowledged (or on
-the first guestd connection), and refuses to export a VM while it contains that
-file. Failed installations retain it for retry. It is never part of saved VM
-configuration or kernel arguments. Existing VMs are not modified by this flow.
+The installer requires an explicit account. The host stages `account` as a
+private two-line file (username, password). The C installer validates it before
+formatting and sends passwords to `chpasswd` through stdin. Fresh rootfs default
+logins are locked; the chosen account receives password-protected sudo access.
+The host removes temporary credentials when installation is acknowledged or
+when guestd connects, and refuses to export a VM while that file remains.
+Failed installations retain the input for an explicit retry. Credentials are
+never part of saved VM configuration or kernel arguments.
 
 The initramfs includes upstream static e2fsprogs binaries for ext2/3/4:
 `mke2fs` (`mkfs.ext4`), `e2fsck` (`fsck.ext4`), `resize2fs`, `tune2fs`,
 and `dumpe2fs`. util-linux supplies static `blkid`, `sfdisk`, and `lsblk` for
 filesystem identification, partition editing, and listing disks. BusyBox supplies
-the recovery shell, basic adapter
-commands, `mount`/`umount`, and the initramfs-specific `switch_root`; its `tc`,
+the recovery shell, `mount`/`umount`, and the initramfs-specific `switch_root`; its `tc`,
 `blkid`, `fsck`, and `mkfs.ext2` applets are deliberately disabled.
 Its `udhcpc` client and a fixed lease hook provide networking during an
 installation. Ubuntu Base and Fedora Container Base are root filesystems, not
@@ -99,21 +97,16 @@ after mounting devtmpfs, so Bash process substitution works in those chroots.
 It mounts devpts for package-manager PTYs and moves both `/run` and `/tmp` into
 the installed root at handoff.
 
-`../adapters/catalog.json` is the installation source of truth consumed by the
-LightHouse creation assistant. It identifies the rootfs archive, checksum,
-adapter and selectable software for Ubuntu, Fedora and Arch Linux ARM. The
-release workflow validates that catalog and publishes the complete adapter
-directory next to the kernel and initramfs. Adapters receive only the fixed
-`NP_*` environment documented above; they create the GPT/ext4 root, unpack and
-initialize the selected distribution, and install selected software in the
-same chroot phase. Software failures therefore return through the init recovery
-channel before handoff; no first-boot installation service or completion marker
-blocks guestd. Rosetta's mount/registration remains a normal boot service.
-Ubuntu additionally offers an
-experimental Steam choice using FEX for the client's 32-bit and 64-bit x86
-code. Its Wine choice instead installs Ubuntu's amd64 Wine loader and libraries;
-Apple's Virtualization translation layer runs that x86-64 process inside the
-ARM64 guest.
+[`../adapters/catalog.json`](../adapters/catalog.json) describes the pinned
+Alpine, Debian, Ubuntu, Fedora and Arch release series, architecture, source,
+checksum policy and optional applications. The modular C installer owns each
+distribution's package, account and service setup. Its failures return through
+the recovery channel before root handoff.
+
+Both ARM64 and amd64 userspaces boot on the ARM64 VM kernel. amd64 roots use a
+4 KiB kernel; early init mounts Rosetta and registers it before running amd64
+PID 1. See [installation ownership](../guest-platform/INSTALLATION.md) for
+root architecture, payload lifetime and required Rosetta adaptations.
 
 `DEPENDENCY_VERSIONS` pins BusyBox, e2fsprogs, util-linux, and the Kata
 configuration revision with source checksums. The weekly upstream workflow

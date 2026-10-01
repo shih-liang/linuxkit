@@ -405,44 +405,6 @@ static void reexec(void) {
     _exit(127);
 }
 
-static int boot_self_update(void) {
-    char ver[NP_MAX_VERSION];
-    guest_version(ver, sizeof(ver));
-    /* Migration/recovery check only. The normal live-update path is NPSY;
-     * never delay the control listener for tens of seconds if the host file
-     * service is temporarily unavailable. */
-    int fd = np_vsock_connect_host(NP_PORT_AGENT, 3);
-    if (fd < 0) {
-        logmsg("self-update dial failed");
-        return 0;
-    }
-    if (np_agent_send_request(fd, NP_GUESTD_NAME, ver) < 0) {
-        close(fd);
-        return 0;
-    }
-    np_agent_hdr hdr;
-    if (np_agent_recv_hdr(fd, &hdr) < 0) {
-        close(fd);
-        return 0;
-    }
-    if (hdr.status == NP_STATUS_FILE || hdr.status == NP_STATUS_FORCE) {
-        logmsg("updating guestd from host");
-        if (apply_guestd_from_fd(fd, &hdr) == 0) {
-            close(fd);
-            reexec();
-        }
-        close(fd);
-        return -1;
-    }
-    if (hdr.status == NP_STATUS_UPTODATE) {
-        logmsg("agent up to date");
-        close(fd);
-        return 0;
-    }
-    close(fd);
-    return 0;
-}
-
 static const char *first_executable(const char *const *paths) {
     for (size_t i = 0; paths[i]; i++) {
         if (access(paths[i], X_OK) == 0)
@@ -750,40 +712,6 @@ static int reconcile_environment_profile(const char *profile_id,
     if (apply)
         return apply_environment_policy(1);
     return 0;
-}
-
-/* Compatibility for the old NPEU request: update the already host-selected
- * profile only. It never performs a new match inside the guest. */
-static int refresh_current_environment_profile(int apply) {
-    struct np_environment_policy current;
-    current_environment_policy(&current);
-    if (!current.revision || !current.profile_id[0]) {
-        errno = ENOENT;
-        return -1;
-    }
-    uint8_t *data = NULL;
-    size_t len = 0;
-    char revision[32];
-    snprintf(revision, sizeof(revision), "%llu",
-             (unsigned long long)current.revision);
-    int rc = np_agent_pull_mem_n(NP_ENV_CATALOG_NAME, revision, &data, &len,
-                                 NULL, 0, 3);
-    if (rc == 1)
-        return 0;
-    if (rc != 0 || !data) {
-        free(data);
-        return -1;
-    }
-    struct np_environment_policy selected;
-    if (select_environment_catalog(data, len, current.profile_id, &selected) < 0) {
-        free(data);
-        return -1;
-    }
-    rc = install_environment_catalog(data, len, current.profile_id, 1);
-    free(data);
-    if (rc < 0)
-        return -1;
-    return apply ? apply_environment_policy(1) : 0;
 }
 
 static unsigned char resolved_service_adapter(const char *init) {
@@ -2249,10 +2177,6 @@ static int parse_launch_req(const uint8_t *p, size_t n, size_t *off, struct laun
             return -1;
     }
     r->nenv = (int)nenv;
-    // Compatibility with guestd 0.2.3 clients, whose launch payload ended at
-    // the environment list.  Current clients append a u32 stdin length.
-    if (*off == n)
-        return 0;
     uint32_t stdin_len = 0;
     if (rd_u32(p, n, off, &stdin_len) < 0 || stdin_len > NP_MAX_STDIN)
         return -1;
@@ -2266,9 +2190,6 @@ static int parse_launch_req(const uint8_t *p, size_t n, size_t *off, struct laun
         memcpy(r->stdin_data, bytes, stdin_len);
         r->stdin_len = stdin_len;
     }
-    // 0.2.6 extension. Older hosts end immediately after stdin.
-    if (*off == n)
-        return 0;
     if (rd_str_alloc(p, n, off, &r->username) < 0)
         return -1;
     return *off == n ? 0 : -1;
@@ -2503,19 +2424,6 @@ static int handle_get_version(struct control_peer *peer, const uint8_t *payload,
     return send_version(peer, id);
 }
 
-static int handle_environment_refresh(struct control_peer *peer, const uint8_t *payload, size_t n) {
-    size_t off = 4;
-    uint64_t id = 0;
-    if (rd_u64(payload, n, &off, &id) < 0 || off != n)
-        return -1;
-    if (refresh_current_environment_profile(1) < 0)
-        return send_bin_error(peer, id, (uint32_t)(errno ? errno : 1),
-                              "environment refresh failed");
-    struct guest_info gi;
-    fill_guest_info(&gi);
-    return send_info(peer, id, &gi);
-}
-
 static int reconcile_guestd_binary(const char *desired_version) {
     char current[NP_MAX_VERSION];
     guest_version(current, sizeof(current));
@@ -2533,7 +2441,7 @@ static int reconcile_guestd_binary(const char *desired_version) {
         close(agent);
         return -1;
     }
-    if ((hdr.status != NP_STATUS_FILE && hdr.status != NP_STATUS_FORCE) ||
+    if (hdr.status != NP_STATUS_FILE ||
         strcmp(hdr.version, desired_version) != 0) {
         if (hdr.payload_len)
             np_agent_discard_payload(agent, hdr.payload_len);
@@ -2763,7 +2671,6 @@ static int is_async_control_request(const uint8_t *payload) {
            memcmp(payload, "NPLN", 4) == 0 ||
            memcmp(payload, "NPSF", 4) == 0 ||
            memcmp(payload, "NPDP", 4) == 0 ||
-           memcmp(payload, "NPEU", 4) == 0 ||
            memcmp(payload, "NPRU", 4) == 0 ||
            memcmp(payload, "NPXC", 4) == 0 ||
            memcmp(payload, "NPUS", 4) == 0 ||
@@ -2782,8 +2689,6 @@ static void *serve_control_job(void *arg) {
         handle_shared_folders(job->peer, payload, n);
     else if (memcmp(payload, "NPDP", 4) == 0)
         handle_desktop_preferences(job->peer, payload, n);
-    else if (memcmp(payload, "NPEU", 4) == 0)
-        handle_environment_refresh(job->peer, payload, n);
     else if (memcmp(payload, "NPRU", 4) == 0)
         handle_run(job->peer, payload, n);
     else if (memcmp(payload, "NPXC", 4) == 0)
@@ -2937,7 +2842,6 @@ int main(int argc, char **argv) {
             ensure_console_integration(init, 1);
         }
     }
-    boot_self_update();
     {
         pthread_t th;
         pthread_create(&th, NULL, session_stack_thread, NULL);

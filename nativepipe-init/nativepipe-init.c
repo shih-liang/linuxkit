@@ -66,7 +66,6 @@ struct np_plan {
     char root_flags[512];
     char init[256];
     char payload_tag[64];
-    char adapter[256];
     char source[256];
 };
 
@@ -362,7 +361,6 @@ static int decode_plan(const uint8_t *payload, size_t length, struct np_plan *pl
         take_string(&reader, plan->disk_identifier, sizeof(plan->disk_identifier)) < 0 ||
         take_string(&reader, plan->root, sizeof(plan->root)) < 0 ||
         take_string(&reader, plan->payload_tag, sizeof(plan->payload_tag)) < 0 ||
-        take_string(&reader, plan->adapter, sizeof(plan->adapter)) < 0 ||
         take_string(&reader, plan->source, sizeof(plan->source)) < 0 ||
         reader.offset != reader.length)
         return -1;
@@ -373,7 +371,6 @@ static int decode_plan(const uint8_t *payload, size_t length, struct np_plan *pl
         return valid_root(plan->root) ? 0 : -1;
     if (!valid_token(plan->disk_identifier, 20) ||
         !valid_token(plan->payload_tag, sizeof(plan->payload_tag) - 1) ||
-        (strcmp(plan->adapter, "/sbin/nativepipe-install") && !valid_payload_path(plan->adapter)) ||
         !valid_payload_path(plan->source))
         return -1;
     return !plan->root[0] || valid_root(plan->root) ? 0 : -1;
@@ -637,15 +634,9 @@ static int run_installation(const struct np_plan *plan, const char *action) {
         "NP_TARGET_ROOT=" NP_NEW_ROOT, disk, source,
         plan->automatic ? "NP_AUTOMATIC=1" : "NP_AUTOMATIC=0", NULL,
     };
-    char *const legacy_arguments[] = {
-        "/bin/sh", (char *)plan->adapter, (char *)action, NULL,
-    };
     char *const arguments[] = {"/sbin/nativepipe-install", (char *)action, NULL};
-    /* C installer belongs to this recovery image. The payload stays noexec.
-     * v1 is retained only to resume VMs created by older FluxWindow versions. */
-    bool native = !strcmp(plan->adapter, arguments[0]);
-    logmsg(native ? "starting nativepipe-install (C installer)" : "resuming legacy installation");
-    return run(native ? arguments : legacy_arguments, environment);
+    logmsg("starting nativepipe-install (C installer)");
+    return run(arguments, environment);
 }
 
 static bool root_is_mounted(void) {
@@ -1174,7 +1165,7 @@ static int append_guest_info(struct buffer *response) {
         "initramfs-1", release, "LightHouse Recovery", "1", "nativepipe-init",
     };
     const char *capabilities[] = {
-        "init.control", "init.mount", "init.execute", "init.install.rootfs.v1", "init.install.rootfs.c.v1",
+        "init.control", "init.mount", "init.execute", "init.install.rootfs.c.v2",
         "fs.read", "fs.stat", "fs.write", "fs.stream.v1",
     };
     for (size_t index = 0; index < sizeof(fields) / sizeof(fields[0]); index++) {
@@ -1186,6 +1177,10 @@ static int append_guest_info(struct buffer *response) {
     for (size_t index = 0; index < sizeof(capabilities) / sizeof(capabilities[0]); index++) {
         if (append_string(response, capabilities[index]) < 0)
             return -1;
+    }
+    const char *environment[] = {"", "0", "", "", release[0] ? system.machine : ""};
+    for (size_t index = 0; index < sizeof(environment) / sizeof(environment[0]); index++) {
+        if (append_string(response, environment[index]) < 0) return -1;
     }
     return 0;
 }

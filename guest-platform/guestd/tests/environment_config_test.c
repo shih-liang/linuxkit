@@ -143,10 +143,8 @@ int main(void) {
 
     struct builder legacy = catalog(1, NP_ADMINISTRATOR_GROUP_WHEEL);
     check(np_environment_catalog_select_profile(
-              legacy.data, legacy.len, &alpine, "alpine-openrc", &selected) == 0,
-          "legacy v1 catalog was rejected");
-    check(selected.administrator_groups == 0,
-          "legacy catalog unexpectedly granted an administrator group");
+              legacy.data, legacy.len, &alpine, "alpine-openrc", &selected) < 0,
+          "removed v1 catalog was accepted");
 
     struct builder unsafe = catalog(2, 1u << 31);
     errno = 0;

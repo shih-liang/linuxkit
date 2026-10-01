@@ -8,7 +8,6 @@
 #include <string.h>
 #include <strings.h>
 
-#define NP_ENV_WIRE_VERSION_MIN 1u
 #define NP_ENV_WIRE_VERSION 2u
 #define NP_ENV_MAX_PROFILES 128u
 #define NP_ENV_MAX_MATCH_VALUES 32u
@@ -154,8 +153,7 @@ static int catalog_select(const void *data, size_t len,
     uint16_t wire = 0, profile_count = 0;
     uint64_t revision = 0;
     if (rd_u16(&r, &wire) < 0 || rd_u16(&r, &profile_count) < 0 ||
-        rd_u64(&r, &revision) < 0 || wire < NP_ENV_WIRE_VERSION_MIN ||
-        wire > NP_ENV_WIRE_VERSION || revision == 0 ||
+        rd_u64(&r, &revision) < 0 || wire != NP_ENV_WIRE_VERSION || revision == 0 ||
         profile_count == 0 || profile_count > NP_ENV_MAX_PROFILES) {
         errno = EPROTO;
         return -1;
@@ -188,7 +186,7 @@ static int catalog_select(const void *data, size_t len,
         uint8_t getty = 0, service = 0;
         uint16_t shell_count = 0;
         if (rd_u32(&r, &methods) < 0 || rd_u32(&r, &flags) < 0 ||
-            (wire >= 2 && rd_u32(&r, &administrator_groups) < 0) ||
+            rd_u32(&r, &administrator_groups) < 0 ||
             rd_u8(&r, &getty) < 0 || rd_u8(&r, &service) < 0 ||
             rd_u16(&r, &shell_count) < 0 || shell_count == 0 ||
             shell_count > NP_ENV_MAX_SHELLS) {

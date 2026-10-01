@@ -3,10 +3,9 @@
 New FluxWindow installations use the modular C implementation in
 `guest-platform/installer`. Both `nativepipe-init` and `nativepipe-install` are
 built into the recovery initramfs. The host sends a data plan and guest artifacts;
-recovery starts the installer directly, without a shell bridge. The old `.sh`
-adapters are retained for older saved installation requests and are not bundled
-by new FluxWindow builds. See `guest-platform/INSTALLATION.md` for ownership and
-the recovery/payload lifecycle.
+recovery starts the installer directly, without a shell bridge. `udhcpc.sh` is
+the recovery DHCP client hook. See `guest-platform/INSTALLATION.md` for ownership
+and the recovery/payload lifecycle.
 
 `catalog.json` is stable distribution and discovery policy. Each source's
 `versionSeries` pins an approved release line: Ubuntu **26.04**, Debian **13**,
@@ -133,10 +132,10 @@ configuration is shared by both root architectures. FluxWindow pins the updated
 initramfs inside the VM for subsequent boots and requires Rosetta to stay enabled.
 The host publishes runtime files by the root's ABI, including self-updates and
 matching graphics hooks. The normal VM terminal and application entrypoints work
-directly; the historical amd64 Shell remains only for old nested environments.
+directly against the selected root system.
 
 ```sh
-fluxwindow -d Ubuntu-amd64
-fluxwindow --no-pty -d Ubuntu-amd64 dpkg --print-architecture
-fluxwindow -d Ubuntu-amd64 sudo apt-get install <package>
+linportal -d Ubuntu-amd64
+linportal --no-pty -d Ubuntu-amd64 dpkg --print-architecture
+linportal -d Ubuntu-amd64 sudo apt-get install <package>
 ```
