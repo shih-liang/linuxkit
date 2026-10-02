@@ -2,6 +2,7 @@
 #include "root.h"
 #include "np.h"
 #include "np_file_rpc.h"
+#include "install_error.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -248,7 +249,13 @@ static int run(int root, char *const argv[], const void *input, size_t length) {
     }
     close(pipefd[0]);
     int rc = wait_child(child);
-    if (rc != 0) fprintf(stderr, "nativepipe-install: %s exited with status %d\n", argv[0], rc);
+    if (rc != 0) {
+        char detail[508];
+        snprintf(detail, sizeof(detail), "%s exited with status %d. See installation logs for command output", argv[0], rc);
+        np_install_report_error(ECHILD, detail);
+        fprintf(stderr, "nativepipe-install: %s\n", detail);
+        errno = ECHILD;
+    }
     return rc;
 }
 

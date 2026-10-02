@@ -1,6 +1,6 @@
 # Installation and guest ownership
 
-FluxWindow's schema-5 installation entry uses the C installer bundled inside
+LinPortal's schema-5 installation entry uses the C installer bundled inside
 the recovery initramfs. `nativepipe-init` executes `/sbin/nativepipe-install`
 directly; the host does not create or send an installation launcher script.
 
@@ -20,7 +20,7 @@ and stop operations clear all handlers, which would remove the execution path
 of PID 1 and every service. Early init owns Rosetta for the whole VM lifetime;
 additional binary formats can still be registered individually through binfmt_misc.
 Its automount unit is also masked because early init already mounted binfmt_misc.
-FluxWindow retains this initramfs after installation and selects the runtime
+LinPortal retains this initramfs after installation and selects the runtime
 publish directory by the VM's root ABI, including self-updates.
 
 amd64 roots require the current Rosetta adaptations: systemd's execution policy
@@ -32,7 +32,7 @@ configuration or installation-task formats.
 
 ## Responsibilities
 
-* FluxWindow discovers upstream releases, authenticates the installation
+* LinPortal discovers upstream releases, authenticates the installation
   catalog, checks artifact digests, and fixes concrete artifacts for each
   installation. The catalog pins the tested release series for discovery and
   cached results; the installer keeps the selected rootfs's package repositories.
@@ -82,13 +82,13 @@ configuration or installation-task formats.
 8. Release installation resources, then boot the installed system. Runtime guestd
    reports readiness independently of installer completion.
 
-FluxWindow pins a copy of the bundled recovery image to the pending operation,
+LinPortal pins a copy of the bundled recovery image to the pending operation,
 next to (outside) its read-only payload. ARM64 roots retain the selected
 kernel/initramfs pair. amd64 roots retain the Rosetta-ready image at
 `platform/rosetta-initramfs` for every normal boot. The payload contains
 `install.json`, verified source
 archives, account input and guest artifacts. It contains no adapter, common
-script or launch bridge. After the installed guestd connects, FluxWindow removes
+script or launch bridge. After the installed guestd connects, LinPortal removes
 the account input and the source archive; the plan and recovery image remain
 available for an explicit disk-resize repair.
 

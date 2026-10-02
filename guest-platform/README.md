@@ -1,7 +1,7 @@
 # LinuxKit guest platform
 
 This directory is the source of the small, distribution-independent guest
-platform installed by LightHouse:
+platform installed by LinPortal:
 
 - `common/` contains the shared NPAG/vsock transport implementation.
 - `bootstrap/` contains the one-shot cidata bootstrap program.
@@ -23,7 +23,7 @@ its `common/file_rpc` directory. CI checks out this shared source explicitly;
 bootstrap, guestd and recovery do not carry private protocol copies.
 Guest execution requires Linux 5.11 or newer for child-side
 [`close_range(CLOSE_RANGE_CLOEXEC)`](https://man7.org/linux/man-pages/man2/close_range.2.html);
-supported FluxWindow kernels provide it.
+supported LinPortal kernels provide it.
 
 ```sh
 make -C guest-platform test
@@ -35,11 +35,11 @@ make -C guest-platform build
 tags or a manual workflow dispatch, not ordinary pushes to `main`.
 Its `linuxkit-linux` artifact is checkout-shaped: downloading it at
 the repository root restores `guest-platform/build/aarch64` and
-`guest-platform/build/x86_64`. FluxWindow copies those binaries together with
+`guest-platform/build/x86_64`. LinPortal copies those binaries together with
 the adapters, service files, and catalogs from the same local checkout.
 
 Kernel and initramfs builds use `build-kernel.yml` and `build-initramfs.yml`; they are
-downloaded by FluxWindow as VM boot resources and are not embedded in the
+downloaded by LinPortal as VM boot resources and are not embedded in the
 application's guest runtime.
 
 ## Shared folders
@@ -59,7 +59,7 @@ switching root. Bootstrap uses the same chunk framing for named NPAG artifacts.
 ### Persistent shared folders
 
 guestd does not mount the host shared-folder device at startup. After the
-handshake, FluxWindow sends `NPSF` (request ID and one mounted/unmounted byte)
+handshake, LinPortal sends `NPSF` (request ID and one mounted/unmounted byte)
 over the existing binary control channel, according to the VM's configured
 folders. The capability is `fs.shared-folders` (guestd 0.2.38).
 The device remains attached even when empty; no folder means no mount.

@@ -78,7 +78,7 @@ jobs:
           commit-message: 'build: update kernel and recovery dependencies'
           title: 'build: update kernel and recovery dependencies'
           body: |
-            Updates every pinned upstream source used by the FluxWindow kernel
+            Updates every pinned upstream source used by the LinPortal kernel
             and initramfs build:
 
             - Linux LTS `${{ needs.resolve.outputs.kernel }}`

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "np_file_rpc.h"
 #include "rosetta.h"
+#include "install_error.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -83,6 +84,7 @@ struct buffer {
 
 static int control_connection = -1;
 static struct np_file_service *file_service;
+static char plan_error[508];
 extern char **environ;
 
 static void stop_file_service(void) {
@@ -516,7 +518,7 @@ static int run(char *const arguments[], char *const environment[]) {
     }
     /* PID 1 also owns package-manager daemon children after they exit. */
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 }
 
 static int run_capture_line(char *const arguments[], char *output, size_t capacity) {
@@ -625,18 +627,49 @@ static int mount_payload(const struct np_plan *plan) {
 }
 
 static int run_installation(const struct np_plan *plan, const char *action) {
+    int errors[2];
+    plan_error[0] = 0;
+    if (pipe2(errors, O_CLOEXEC | O_NONBLOCK) < 0) return -1;
+    if (fcntl(errors[1], F_SETFD, 0) < 0) {
+        int saved = errno;
+        close(errors[0]); close(errors[1]); errno = saved;
+        return -1;
+    }
     char disk[sizeof(plan->disk) + 16];
     char source[sizeof(plan->source) + 18];
+    char error_fd[48];
     snprintf(disk, sizeof(disk), "NP_TARGET_DISK=%s", plan->disk);
     snprintf(source, sizeof(source), "NP_SOURCE_PATH=%s", plan->source);
+    snprintf(error_fd, sizeof(error_fd), "NP_INSTALL_ERROR_FD=%d", errors[1]);
     char *const environment[] = {
         "PATH=/sbin:/bin:/usr/sbin:/usr/bin", "HOME=/", "TERM=linux",
-        "NP_TARGET_ROOT=" NP_NEW_ROOT, disk, source,
+        "NP_TARGET_ROOT=" NP_NEW_ROOT, disk, source, error_fd,
         plan->automatic ? "NP_AUTOMATIC=1" : "NP_AUTOMATIC=0", NULL,
     };
     char *const arguments[] = {"/sbin/nativepipe-install", (char *)action, NULL};
     logmsg("starting nativepipe-install (C installer)");
-    return run(arguments, environment);
+    int result = run(arguments, environment);
+    int saved = errno;
+    close(errors[1]);
+    struct np_install_error report;
+    ssize_t count;
+    do { count = read(errors[0], &report, sizeof(report)); } while (count < 0 && errno == EINTR);
+    close(errors[0]);
+    if (result != 0) {
+        if (count == sizeof(report) && report.code > 0 && report.message[0] &&
+            memchr(report.message, 0, sizeof(report.message))) {
+            snprintf(plan_error, sizeof(plan_error), "%s", report.message);
+            saved = report.code;
+        } else {
+            saved = result < 0 && saved ? saved : ECHILD;
+            if (result < 0)
+                snprintf(plan_error, sizeof(plan_error), "Could not run the C installer: %s", strerror(saved));
+            else
+                snprintf(plan_error, sizeof(plan_error), "C installer exited with status %d without an error report. See installation logs", result);
+        }
+    }
+    errno = saved;
+    return result;
 }
 
 static bool root_is_mounted(void) {
@@ -1114,8 +1147,9 @@ static int prepare_plan(struct np_plan *plan) {
             return -1;
         const char *action = plan->action == NP_ACTION_INSTALL ? "install" : "repair";
         if (run_installation(plan, action) != 0) {
+            int saved = errno;
             logmsg("installer failed; waiting for another host command");
-            errno = EIO;
+            errno = saved;
             return -1;
         }
     }
@@ -1162,7 +1196,7 @@ static int append_guest_info(struct buffer *response) {
     struct utsname system;
     const char *release = uname(&system) == 0 ? system.release : "";
     const char *fields[] = {
-        "initramfs-1", release, "LightHouse Recovery", "1", "nativepipe-init",
+        "initramfs-1", release, "LinPortal Recovery", "1", "nativepipe-init",
     };
     const char *capabilities[] = {
         "init.control", "init.mount", "init.execute", "init.install.rootfs.c.v2",
@@ -1241,13 +1275,15 @@ static int dispatch_request(int connection, const uint8_t *payload, size_t lengt
         stop_file_service();
         struct np_plan plan;
         if (decode_plan(payload, length, &plan) == 0) {
+            plan_error[0] = 0;
             bool response_sent = false;
             result = execute_plan(&plan, connection, &response_sent);
             if (result < 0) {
                 int code = errno ? errno : EIO;
-                log_errno("execute plan");
+                const char *message = plan_error[0] ? plan_error : strerror(code);
+                dprintf(STDERR_FILENO, "[nativepipe-init] execute plan: %s\n", message);
                 if (!response_sent)
-                    send_error(connection, request_id, code, strerror(code));
+                    send_error(connection, request_id, code, message);
             }
             return result;
         }

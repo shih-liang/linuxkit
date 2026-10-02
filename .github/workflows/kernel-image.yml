@@ -51,7 +51,7 @@ jobs:
             echo "KERNEL_VERSION=$kernel_version"
             echo "SOURCE_DATE_EPOCH=$source_date_epoch"
             echo "KBUILD_BUILD_TIMESTAMP=@$source_date_epoch"
-            echo "KBUILD_BUILD_USER=lighthouse"
+            echo "KBUILD_BUILD_USER=linportal"
             echo "KBUILD_BUILD_HOST=github-actions"
             cat DEPENDENCY_VERSIONS
           } >> "$GITHUB_ENV"
@@ -122,7 +122,7 @@ jobs:
             | sha256sum --check --strict -
           tar --extract --file "linux-${KERNEL_VERSION}.tar.xz"
 
-      - name: Merge Kata ARM64 and FluxWindow configuration
+      - name: Merge Kata ARM64 and LinPortal configuration
         env:
           GH_TOKEN: ${{ github.token }}
         if: env.REUSE_KERNEL != 'true'
@@ -162,7 +162,7 @@ jobs:
           set -eu
           cd "linux-${KERNEL_VERSION}"
           make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
-          # This is the complete Linux hardware contract that LightHouse can
+          # This is the complete Linux hardware contract that LinPortal can
           # currently ask Virtualization.framework to expose: direct boot,
           # PCI/virtio-mmio, block/NVMe, network, console, entropy, vsock,
           # balloon, input, sound, graphics, virtio-fs, and the XHCI-backed USB
@@ -330,7 +330,7 @@ jobs:
             CONFIG_NET_CLS_FLOWER=y \
             CONFIG_WIREGUARD=y; do
             grep -Fxq "$setting" .config || {
-              echo "Required LightHouse setting missing: $setting" >&2
+              echo "Required LinPortal setting missing: $setting" >&2
               exit 1
             }
           done
@@ -340,7 +340,7 @@ jobs:
           grep -Fxq '# CONFIG_MODULE_SIG is not set' .config
           grep -Fxq '# CONFIG_TRIM_UNUSED_KSYMS is not set' .config
           grep -Fxq 'CONFIG_LSM="landlock,yama,integrity,apparmor,selinux"' .config
-          # These classes are excluded by current LightHouse product policy,
+          # These classes are excluded by current LinPortal product policy,
           # not because Virtualization.framework can never expose them.
           for setting in \
             '# CONFIG_MEDIA_SUPPORT is not set'; do
@@ -372,7 +372,7 @@ jobs:
             }
           done
           if grep -E '^CONFIG_[A-Za-z0-9_]+=m$' .config; then
-            echo 'LightHouse boot and supported-device features must remain built in.' >&2
+            echo 'LinPortal boot and supported-device features must remain built in.' >&2
             exit 1
           fi
           # The guest only sees VZ/NativePipe virtio devices plus explicitly
@@ -402,22 +402,22 @@ jobs:
           set -eu
           module_dir="$PWD/module-smoke"
           mkdir -p "$module_dir"
-          printf '%s\n' 'obj-m := lighthouse_module_smoke.o' > "$module_dir/Makefile"
+          printf '%s\n' 'obj-m := linportal_module_smoke.o' > "$module_dir/Makefile"
           printf '%s\n' \
             '#include <linux/init.h>' \
             '#include <linux/module.h>' \
-            'static int __init lighthouse_module_smoke_init(void) { return 0; }' \
-            'static void __exit lighthouse_module_smoke_exit(void) {}' \
-            'module_init(lighthouse_module_smoke_init);' \
-            'module_exit(lighthouse_module_smoke_exit);' \
-            'MODULE_DESCRIPTION("LightHouse external module ABI smoke test");' \
+            'static int __init linportal_module_smoke_init(void) { return 0; }' \
+            'static void __exit linportal_module_smoke_exit(void) {}' \
+            'module_init(linportal_module_smoke_init);' \
+            'module_exit(linportal_module_smoke_exit);' \
+            'MODULE_DESCRIPTION("LinPortal external module ABI smoke test");' \
             'MODULE_LICENSE("GPL");' \
-            > "$module_dir/lighthouse_module_smoke.c"
+            > "$module_dir/linportal_module_smoke.c"
           make -C "linux-${KERNEL_VERSION}" \
             ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             M="$module_dir" modules
-          test -s "$module_dir/lighthouse_module_smoke.ko"
-          "$CROSS_COMPILE"readelf -h "$module_dir/lighthouse_module_smoke.ko" \
+          test -s "$module_dir/linportal_module_smoke.ko"
+          "$CROSS_COMPILE"readelf -h "$module_dir/linportal_module_smoke.ko" \
             | grep -q 'Machine:.*AArch64'
 
       - name: Collect kernel output

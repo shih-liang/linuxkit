@@ -38,7 +38,7 @@ const struct np_distribution *np_distribution_find(const char *id) {
 int np_distribution_unused_hardware(const struct np_distribution *d, const char *name) {
     if (!d || !name || d->packages != NP_PACMAN) return 0;
     /* The ARM publisher's general-purpose image includes a physical-machine
-     * kernel and firmware. FluxWindow supplies its own kernel and VirtIO
+     * kernel and firmware. LinPortal supplies its own kernel and VirtIO
      * devices. Keep headers, kmod and Mesa: userspace still needs them. */
     return !strcmp(name, "linux-aarch64") || !strcmp(name, "linux-firmware") ||
         !strncmp(name, "linux-firmware-", 15) || !strcmp(name, "firmware-raspberrypi");

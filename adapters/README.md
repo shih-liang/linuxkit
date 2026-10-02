@@ -1,6 +1,6 @@
 # Installation catalog
 
-New FluxWindow installations use the modular C implementation in
+New LinPortal installations use the modular C implementation in
 `guest-platform/installer`. Both `nativepipe-init` and `nativepipe-install` are
 built into the recovery initramfs. The host sends a data plan and guest artifacts;
 recovery starts the installer directly, without a shell bridge. `udhcpc.sh` is
@@ -25,13 +25,13 @@ and the Arch Linux keyring and HTTPS mirror are selected by its C policy.
 Arch package repositories still roll, so this image pin does not
 freeze package versions or promise future package compatibility.
 
-When the creation marketplace opens, FluxWindow reads each publisher-owned
+When the creation marketplace opens, LinPortal reads each publisher-owned
 `indexURL`, selects artifacts for the chosen userspace architecture, obtains the publisher's checksum,
 and caches the resolved releases in its own Application Support directory. New
 results replace the `Latest` marker within the approved line. Both discovery
 and cache loading enforce the same policy, including the amd64 root system;
 cached releases outside the line are no longer offered for new installations.
-Existing VM disks are unaffected. FluxWindow verifies the downloaded rootfs before installation, and
+Existing VM disks are unaffected. LinPortal verifies the downloaded rootfs before installation, and
 the C installer checks it again before preparing the disk. Debian's published
 rootfs, version and manifest are resolved at the same immutable Git commit.
 
@@ -66,7 +66,7 @@ uses the distribution's `libwayland-client` and `libwayland-server` packages;
 there is no `wayland-libs` package.
 
 Arch installs the distribution's `realtime-privileges` package and adds the
-account selected in FluxWindow to its `realtime` group. The package owns the
+account selected in LinPortal to its `realtime` group. The package owns the
 group and PAM limits; the adapter does not duplicate them or hardcode a UID.
 Arch's `systemd-user` PAM stack loads these limits for the user manager and its
 audio services, allowing PipeWire's `libpipewire-module-rt` to set realtime
@@ -101,7 +101,7 @@ These are fresh-install defaults, not a migration for existing VMs. Changing
 limits and group membership in an existing VM requires recreating the user
 manager and audio processes; logout alone may leave a lingering manager running.
 
-The FluxWindow kernel retains `CONFIG_RT_GROUP_SCHED=y`. The host adds
+The LinPortal kernel retains `CONFIG_RT_GROUP_SCHED=y`. The host adds
 `rt_group_sched=0` to its direct-boot defaults because cgroup v2 has no interface
 to provision the legacy per-group realtime budget, even when RTKit is installed.
 This boot parameter works with the existing 6.18 kernels; no kernel rebuild is
@@ -128,7 +128,7 @@ interpreter. Translation is available before the first amd64 process starts.
 
 `guest-platform/common/rosetta.c` is shared by recovery installation, early boot
 and optional compatibility on ARM64 systems. Distribution package and service
-configuration is shared by both root architectures. FluxWindow pins the updated
+configuration is shared by both root architectures. LinPortal pins the updated
 initramfs inside the VM for subsequent boots and requires Rosetta to stay enabled.
 The host publishes runtime files by the root's ABI, including self-updates and
 matching graphics hooks. The normal VM terminal and application entrypoints work

@@ -11,7 +11,7 @@ current_kernel="$(tr -d '[:space:]' < KERNEL_VERSION)"
 fetch() {
     local url="$1"
     local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-    local -a headers=(--user-agent 'LightHouse dependency updater')
+    local -a headers=(--user-agent 'LinPortal dependency updater')
 
     if [[ "$url" == https://api.github.com/* && -n "$token" ]]; then
         headers+=(

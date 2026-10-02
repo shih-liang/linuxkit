@@ -23,6 +23,8 @@ static int test_execve(const char *path, char *const args[], char *const env[]);
 
 static int shell_exit_status;
 static int shutdown_step;
+static int installer_exit_status = 23;
+static bool installer_reports_error;
 
 static int test_kill(pid_t pid, int signal) {
     if (pid != -1 || signal != (shutdown_step == 0 ? SIGTERM : SIGKILL))
@@ -51,8 +53,18 @@ static int test_execve(const char *path, char *const args[], char *const env[]) 
             root |= !strcmp(env[i], "NP_TARGET_ROOT=/newroot");
             disk |= !strcmp(env[i], "NP_TARGET_DISK=/dev/vda");
             source |= !strcmp(env[i], "NP_SOURCE_PATH=/run/nativepipe/payload/source");
+            if (installer_reports_error && !strncmp(env[i], "NP_INSTALL_ERROR_FD=", 20)) {
+                int fd = atoi(env[i] + 20);
+                struct np_install_error report = {.code = ENETUNREACH};
+                strcpy(report.message, "Installation network has no DNS: Network unreachable");
+                if (write(fd, &report, sizeof(report)) != sizeof(report)) abort();
+                /* A later cleanup error must not replace the original cause. */
+                report.code = EBUSY;
+                strcpy(report.message, "Cleanup could not unmount target");
+                if (write(fd, &report, sizeof(report)) != sizeof(report)) abort();
+            }
         }
-        _exit(root && disk && source ? 23 : 24);
+        _exit(root && disk && source ? installer_exit_status : 24);
     }
     if (!strcmp(path, "/bin/sh") && !strcmp(args[1], "-l"))
         _exit(shell_exit_status);
@@ -95,6 +107,24 @@ static int self_test(const char *program_path) {
     strcpy(native.source, "/run/nativepipe/payload/source");
     if (run_installation(&native, "install") != 23 ||
         run_installation(&native, "repair") != 23) return 1;
+    if (!strstr(plan_error, "status 23") || strstr(plan_error, "I/O error")) return 1;
+    installer_reports_error = true;
+    if (run_installation(&native, "install") != 23 || errno != ENETUNREACH ||
+        strcmp(plan_error, "Installation network has no DNS: Network unreachable")) return 1;
+    int errors[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, errors) < 0 ||
+        send_error(errors[0], 42, ENETUNREACH, plan_error) < 0) return 1;
+    uint8_t *error_payload = NULL;
+    size_t error_length = 0;
+    if (receive_payload(errors[1], &error_payload, &error_length) < 0 ||
+        error_length < 18 || memcmp(error_payload, "NPER", 4) ||
+        read_le32(error_payload + 12) != ENETUNREACH ||
+        error_length != 18 + strlen(plan_error) ||
+        memcmp(error_payload + 18, plan_error, strlen(plan_error))) return 1;
+    free(error_payload); close(errors[0]); close(errors[1]);
+    installer_reports_error = false;
+    installer_exit_status = 0;
+    if (run_installation(&native, "install") != 0 || plan_error[0]) return 1;
     char device_path[] = "/tmp/nativepipe-init-dev.XXXXXX";
     if (!mkdtemp(device_path))
         return 1;

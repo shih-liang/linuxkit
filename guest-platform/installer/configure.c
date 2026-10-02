@@ -111,7 +111,7 @@ int np_install_account(struct np_install *install) {
     if (rc != 0) return -1;
     char sudoers[128];
     snprintf(sudoers, sizeof(sudoers), "%s ALL=(ALL:ALL) ALL\n", install->username);
-    TRY(TEXT(install->root, "/etc/sudoers.d/90-fluxwindow-user", sudoers, 0440));
+    TRY(TEXT(install->root, "/etc/sudoers.d/90-linportal-user", sudoers, 0440));
     return 0;
 }
 
@@ -142,7 +142,7 @@ static int openrc_enable(int root, const char *level, const char *service) {
 
 int np_install_configure(struct np_install *install) {
     int root = install->root;
-    TRY(TEXT(root, "/etc/hostname", "fluxwindow\n", 0644));
+    TRY(TEXT(root, "/etc/hostname", "linportal\n", 0644));
     TRY(TEXT(root, "/etc/fstab", "LABEL=nativepipe-root / ext4 defaults 0 1\n", 0644));
     /* Never retain an image publisher's machine identity. systemd initializes
      * an empty file on first boot; OpenRC's dbus rejects an existing empty file
@@ -197,7 +197,7 @@ int np_install_configure(struct np_install *install) {
             TRY(np_root_link(root, "/etc/systemd/system/proc-sys-fs-binfmt_misc.automount", "/dev/null"));
         }
         TRY(TEXT(root, "/etc/machine-id", "", 0644));
-        TRY(TEXT(root, "/etc/systemd/network/20-lighthouse.network",
+        TRY(TEXT(root, "/etc/systemd/network/20-linportal.network",
                  "[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\nIPv6AcceptRA=yes\n", 0644));
         TRY(np_root_link(root, "/etc/resolv.conf", "/run/systemd/resolve/stub-resolv.conf"));
         TRY(systemd_enable(root, "multi-user.target", "systemd-networkd.service", NULL));
@@ -267,15 +267,15 @@ int np_install_guest(struct np_install *install) {
     TRY(TEXT(install->root, "/var/lib/nativepipe/session-user", install->username, 0644));
     if (install->rosetta && strcmp(install->architecture, "amd64")) {
         if (install->distribution->init == NP_SYSTEMD) {
-            TRY(TEXT(install->root, "/etc/systemd/system/lighthouse-rosetta.service",
+            TRY(TEXT(install->root, "/etc/systemd/system/linportal-rosetta.service",
                      "[Unit]\nDescription=Mount Apple Rosetta for Linux\nBefore=nativepipe-guestd.service\n\n"
                      "[Service]\nType=oneshot\nExecStart=/usr/libexec/nativepipe/nativepipe-guestd --prepare-rosetta\nRemainAfterExit=yes\n", 0644));
-            TRY(systemd_enable(install->root, "multi-user.target", "lighthouse-rosetta.service", NULL));
+            TRY(systemd_enable(install->root, "multi-user.target", "linportal-rosetta.service", NULL));
         } else {
-            TRY(TEXT(install->root, "/etc/init.d/lighthouse-rosetta",
+            TRY(TEXT(install->root, "/etc/init.d/linportal-rosetta",
                      "#!/sbin/openrc-run\ncommand=/usr/libexec/nativepipe/nativepipe-guestd\n"
                      "command_args=--prepare-rosetta\ndepend() { need localmount; before nativepipe-guestd; }\n", 0755));
-            TRY(openrc_enable(install->root, "default", "lighthouse-rosetta"));
+            TRY(openrc_enable(install->root, "default", "linportal-rosetta"));
         }
     }
     return install->distribution->init == NP_SYSTEMD

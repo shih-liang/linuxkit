@@ -1,4 +1,4 @@
-name: Publish FluxWindow kernel and initramfs
+name: Publish LinPortal kernel and initramfs
 
 on:
   push:
@@ -141,6 +141,6 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
             --draft --generate-notes \
-            --title "FluxWindow Kernel ${KERNEL_VERSION}-${RELEASE_REVISION}" \
+            --title "LinPortal Kernel ${KERNEL_VERSION}-${RELEASE_REVISION}" \
             release/*
           gh release edit "$RELEASE_TAG" --draft=false --prerelease

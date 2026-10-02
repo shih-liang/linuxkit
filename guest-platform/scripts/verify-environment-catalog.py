@@ -46,7 +46,7 @@ def main():
     if len(public_key) != 32 or len(signature) != 64:
         raise SystemExit("environment catalog is not an Ed25519 key/signature pair")
 
-    with tempfile.TemporaryDirectory(prefix="lighthouse-catalog-verify-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="linportal-catalog-verify-") as temporary:
         temporary = Path(temporary)
         public_der = temporary / "public.der"
         payload_path = temporary / "payload"

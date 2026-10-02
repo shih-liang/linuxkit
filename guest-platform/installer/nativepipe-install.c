@@ -7,6 +7,7 @@
 #include "np_file_rpc.h"
 #include "os_release.h"
 #include "rosetta.h"
+#include "install_error.h"
 
 #include <json-c/json.h>
 #include <openssl/evp.h>
@@ -32,7 +33,12 @@
 #include <unistd.h>
 
 static int error(const char *message) {
-    fprintf(stderr, "nativepipe-install: %s: %s\n", message, strerror(errno));
+    int code = errno ? errno : EPROTO;
+    char detail[508];
+    snprintf(detail, sizeof(detail), "%s: %s", message, strerror(code));
+    np_install_report_error(code, detail);
+    fprintf(stderr, "nativepipe-install: %s\n", detail);
+    errno = code;
     return -1;
 }
 
@@ -61,7 +67,7 @@ static int ensure_network(void) {
             stat("/etc/resolv.conf", &dns) == 0 && dns.st_size > 0) { result = 0; break; }
     }
     closedir(interfaces);
-    if (result) { errno = ENETUNREACH; error("no installation network with DNS"); }
+    if (result) { errno = ENETUNREACH; error("Installation cannot reach a network with DNS. Check the VM network connection and retry"); }
     return result;
 }
 
@@ -273,6 +279,9 @@ static int verified_root(struct np_install *install) {
 
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    int error_fd = np_install_error_fd();
+    if (error_fd >= 0 && fcntl(error_fd, F_SETFD, FD_CLOEXEC) < 0)
+        return error("cannot prepare installation error reporting") != 0;
     if (argc > 1 && !strcmp(argv[1], "apps")) return np_applications_command(argc - 2, argv + 2);
     if (geteuid() != 0) { errno = EPERM; return error("installation requires root") != 0; }
     const char *action = argc > 1 ? argv[1] : "";
@@ -292,6 +301,7 @@ int main(int argc, char **argv) {
     char manifest[16384];
     json_object *plan = NULL;
     int mounted = 0, result = 1;
+    const char *operation = "Read and validate installation plan";
     ssize_t manifest_size = install.payload < 0 ? -1 : np_root_read(install.payload, "/install.json", manifest, sizeof(manifest));
     if (manifest_size < 0 || memchr(manifest, 0, (size_t)manifest_size)) goto done;
     json_tokener *parser = json_tokener_new();
@@ -350,7 +360,11 @@ int main(int argc, char **argv) {
         close(library);
         if (valid < 0) goto done;
     }
-    if (account(&install) < 0 || source_verified(source, checksum) < 0) goto done;
+    operation = "Read installation account";
+    if (account(&install) < 0) goto done;
+    operation = "Verify system download";
+    if (source_verified(source, checksum) < 0) goto done;
+    operation = "Verify guest tools and prepare installation network";
     int guest = np_file_open(install.payload, "/agent/nativepipe-guestd", O_RDONLY, 0);
     if (guest < 0) goto done;
     int valid_guest = verify_elf_architecture(guest, install.architecture);
@@ -362,6 +376,7 @@ int main(int argc, char **argv) {
     if (guest < 0) goto done;
     close(guest);
     int fresh;
+    operation = "Prepare target disk";
     if (!strcmp(action, "directory")) {
         fresh = mkdir(root_path, 0700) == 0;
         if (!fresh && errno != EEXIST) goto done;
@@ -386,16 +401,22 @@ int main(int argc, char **argv) {
     }
     if (complete) { result = verified_root(&install) == 0 ? 0 : 1; goto done; }
     if (!extracted) {
+        operation = "Extract and verify system files";
         if (stage(install.root, id, "prepared") < 0 || np_rootfs_extract(source, root_path, image, install.architecture) < 0 || verified_root(&install) < 0 || stage(install.root, id, "extracted") < 0) goto done;
     }
-    if (np_install_packages(&install) < 0 ||
-        np_install_account(&install) < 0 ||
-        np_applications_install(&install, applications, application_count) < 0 ||
-        np_install_guest(&install) < 0 ||
-        np_install_configure(&install) < 0 || stage(install.root, id, "complete") < 0) goto done;
+    operation = "Install system packages";
+    if (np_install_packages(&install) < 0) goto done;
+    operation = "Create user account";
+    if (np_install_account(&install) < 0) goto done;
+    operation = "Install selected software";
+    if (np_applications_install(&install, applications, application_count) < 0) goto done;
+    operation = "Install guest tools";
+    if (np_install_guest(&install) < 0) goto done;
+    operation = "Configure installed system";
+    if (np_install_configure(&install) < 0 || stage(install.root, id, "complete") < 0) goto done;
     result = 0;
 done:
-    if (result) fputs("nativepipe-install: installation failed; see the preceding operation error\n", stderr);
+    if (result) error(operation);
     explicit_bzero(install.password, sizeof(install.password));
     if (plan) json_object_put(plan);
     if (install.root >= 0) close(install.root);

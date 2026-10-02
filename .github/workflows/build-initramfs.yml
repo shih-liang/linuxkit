@@ -48,7 +48,7 @@ jobs:
             echo "KERNEL_VERSION=$kernel_version"
             echo "SOURCE_DATE_EPOCH=$source_date_epoch"
             echo "KBUILD_BUILD_TIMESTAMP=@$source_date_epoch"
-            echo "KBUILD_BUILD_USER=lighthouse"
+            echo "KBUILD_BUILD_USER=linportal"
             echo "KBUILD_BUILD_HOST=github-actions"
             cat DEPENDENCY_VERSIONS
           } >> "$GITHUB_ENV"

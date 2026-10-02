@@ -11,7 +11,7 @@ ARCHIVE_FLAGS = $(shell $(PKG_CONFIG) --cflags libarchive json-c libcrypto)
 ARCHIVE_LIBS = $(shell $(PKG_CONFIG) --libs libarchive json-c libcrypto)
 COMMON := ../common/np.c $(FILE_RPC_DIR)/np_file_wire.c
 ROOT := ../common/root.c
-ROOT_HEADER := ../common/root.h
+ROOT_HEADER := ../common/root.h ../common/install_error.h
 APPS := apps.c apps.h packages.c $(BUILD)/applications.inc
 
 $(BUILD)/applications.inc: applications.json embed-apps.py $(wildcard presets/*.sh)

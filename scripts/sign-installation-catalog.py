@@ -2,8 +2,8 @@
 """Sign the installation catalog with the release Ed25519 key.
 
 The private key is a base64-encoded 32-byte Ed25519 seed supplied through the
-LIGHTHOUSE_CATALOG_SIGNING_KEY Actions secret. The public key is committed and
-also embedded in LightHouse.app; verifying the new signature before writing the
+LINPORTAL_CATALOG_SIGNING_KEY publishing environment variable. The public key is committed and
+also embedded in LinPortal.app; verifying the new signature before writing the
 envelope prevents an unrelated or mistyped secret from publishing a catalog.
 """
 
@@ -26,9 +26,9 @@ if len(sys.argv) != 4:
 catalog_path = pathlib.Path(sys.argv[1])
 public_key_path = pathlib.Path(sys.argv[2])
 output_path = pathlib.Path(sys.argv[3])
-secret = os.environ.get("LIGHTHOUSE_CATALOG_SIGNING_KEY", "").strip()
+secret = os.environ.get("LINPORTAL_CATALOG_SIGNING_KEY", "").strip()
 if not secret:
-    fail("LIGHTHOUSE_CATALOG_SIGNING_KEY is not configured")
+    fail("LINPORTAL_CATALOG_SIGNING_KEY is not configured")
 
 try:
     private_key = base64.b64decode(secret, validate=True)
@@ -42,7 +42,7 @@ payload = catalog_path.read_bytes()
 private_der = bytes.fromhex("302e020100300506032b657004220420") + private_key
 public_der = bytes.fromhex("302a300506032b6570032100") + public_key
 
-with tempfile.TemporaryDirectory(prefix="lighthouse-catalog-sign-") as temporary:
+with tempfile.TemporaryDirectory(prefix="linportal-catalog-sign-") as temporary:
     temporary_path = pathlib.Path(temporary)
     private_path = temporary_path / "private.der"
     public_path = temporary_path / "public.der"

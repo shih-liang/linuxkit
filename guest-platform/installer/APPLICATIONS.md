@@ -46,7 +46,7 @@ The CLI binaries are available system-wide. Package-managed updates and removals
 remain owned by the distribution. Codex's standalone executable is
 `/usr/local/bin/codex`; Arch's standalone Claude Code is `/usr/local/bin/claude`.
 Alpine adds a POSIX launcher selecting the system ripgrep, including non-login
-launches from FluxApps. Standalone binary replacement is atomic. No additional application daemon is introduced.
+launches from LinPortal Apps. Standalone binary replacement is atomic. No additional application daemon is introduced.
 
 ## Module boundaries
 
@@ -78,7 +78,7 @@ launches from FluxApps. Standalone binary replacement is atomic. No additional a
   repository keys are checked against recorded fingerprints before trust.
 - `adapters/sync-apps.py` derives GUI choices from the same policy. Run it with
   `--write` after changing visible applications; `adapters/validate.py` detects
-  drift. FluxWindow transports only names and retains its existing host/guest
+  drift. LinPortal transports only names and retains its existing host/guest
   installation protocol.
 
 Recovery uses private mount/PID namespaces and restores DNS before every
@@ -114,5 +114,5 @@ report for actual installation and boot test results.
 - [Claude Desktop for Linux](https://support.claude.com/en/articles/10065433-install-claude-desktop)
 
 Desktop availability here means an official package recipe exists. See the
-FluxWindow application-installer verification report for actual test outcomes;
+LinPortal application-installer verification report for actual test outcomes;
 account-dependent features and nested virtualization are separate requirements.
