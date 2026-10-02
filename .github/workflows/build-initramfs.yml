@@ -74,7 +74,7 @@ jobs:
             build-essential bzip2 cpio gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             libncurses-dev:arm64 \
-            pkg-config libarchive-dev:arm64 libjson-c-dev:arm64 libssl-dev:arm64 \
+            pkg-config libjson-c-dev:arm64 libssl-dev:arm64 \
             libarchive-dev:amd64 libjson-c-dev:amd64 libssl-dev:amd64 \
             qemu-user xz-utils
           test -f /usr/lib/aarch64-linux-gnu/libncursesw.a
@@ -255,6 +255,12 @@ jobs:
       - name: Build the static C installer into Recovery
         run: |
           set -eu
+          # Ubuntu's libarchive-dev depends on non-multiarch libext2fs-dev.
+          # Finish native tests before replacing those host development packages
+          # with target packages. Runtime libraries and the amd64 Rosetta shim
+          # remain available; never force incompatible headers to coexist.
+          sudo apt-get install --yes --no-install-recommends \
+            libext2fs-dev:arm64 libarchive-dev:arm64
           export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           make -C guest-platform/installer \
             FILE_RPC_DIR="$PWD/.deps/nativepipe/common/file_rpc" \
