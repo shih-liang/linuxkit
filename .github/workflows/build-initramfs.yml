@@ -26,6 +26,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
         with:
           repository: shih-liang/nativepipe
+          ref: 3be550af70a245a2bebe541fbfdc894fd16a663e
           path: .deps/nativepipe
           sparse-checkout: common/file_rpc
           persist-credentials: false
@@ -277,12 +278,54 @@ jobs:
           fi
           notices=initramfs-root/usr/share/doc/nativepipe-install
           mkdir -p "$notices"
-          for package in libarchive-dev libjson-c-dev libssl-dev libc6 libacl1-dev libattr1-dev libxml2-dev liblzma-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev nettle-dev; do
+          for package in libarchive-dev libjson-c-dev libssl-dev libc6 libacl1-dev libattr1-dev libxml2-dev liblzma-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev nettle-dev libncurses-dev; do
             source="/usr/share/doc/$package/copyright"
             test -f "$source" || source="/usr/share/doc/$package:arm64/copyright"
             test -f "$source"
             cp "$source" "$notices/$package.copyright"
+            dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
+              "$package:arm64" >> "$notices/package-versions.tsv"
           done
+          # The cross compiler may use glibc/libgcc from cross packages rather
+          # than the multiarch runtime. Keep the owners of the actual archives.
+          for library in libc.a libgcc.a; do
+            archive=$("${CROSS_COMPILE}gcc" -print-file-name="$library")
+            package=$(dpkg-query -S "$archive" | sed 's/: \/.*$//' | head -n 1)
+            test -n "$package"
+            source="/usr/share/doc/$package/copyright"
+            test -f "$source"
+            cp "$source" "$notices/$package.copyright"
+            dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
+              "$package" >> "$notices/package-versions.tsv"
+          done
+
+      - name: Collect recovery distribution notices
+        run: |
+          set -eu
+          notices=initramfs-root/usr/share/doc/nativepipe-recovery
+          mkdir -p "$notices/busybox" "$notices/e2fsprogs" "$notices/util-linux"
+          cp "busybox-${BUSYBOX_VERSION}/LICENSE" "$notices/busybox/"
+          cp "e2fsprogs-${E2FSPROGS_VERSION}/NOTICE" "$notices/e2fsprogs/"
+          cp "util-linux-${UTIL_LINUX_VERSION}/COPYING" \
+            "util-linux-${UTIL_LINUX_VERSION}/README.licensing" "$notices/util-linux/"
+          cp -R "util-linux-${UTIL_LINUX_VERSION}/Documentation/licenses" \
+            "$notices/util-linux/"
+          cp -R LICENSES "$notices/platform"
+          {
+            printf '# Recovery source provenance\n\n'
+            printf 'LinPortal suite: %s\n\n' "$(cat RELEASE_VERSION)"
+            printf 'Build configuration and original source: https://github.com/%s/tree/%s\n\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+            printf 'Shared NativePipe file RPC source: https://github.com/shih-liang/NativePipe/tree/%s/common/file_rpc\n\n' "$(git -C .deps/nativepipe rev-parse HEAD)"
+            printf '| Component | Version | Source archive | SHA-256 |\n| --- | --- | --- | --- |\n'
+            printf '| BusyBox | %s | https://busybox.net/downloads/busybox-%s.tar.bz2 | %s |\n' "$BUSYBOX_VERSION" "$BUSYBOX_VERSION" "$BUSYBOX_SHA256"
+            printf '| e2fsprogs | %s | https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v%s/e2fsprogs-%s.tar.xz | %s |\n' "$E2FSPROGS_VERSION" "$E2FSPROGS_VERSION" "$E2FSPROGS_VERSION" "$E2FSPROGS_SHA256"
+            series=$(printf '%s' "$UTIL_LINUX_VERSION" | cut -d. -f1,2)
+            printf '| util-linux | %s | https://www.kernel.org/pub/linux/utils/util-linux/v%s/util-linux-%s.tar.xz | %s |\n' "$UTIL_LINUX_VERSION" "$series" "$UTIL_LINUX_VERSION" "$UTIL_LINUX_SHA256"
+            printf '\nStatic library copyright notices and exact Ubuntu source package versions are in nativepipe-install/.\n'
+          } > "$notices/SOURCES.md"
+          mkdir recovery-licenses
+          cp -R "$notices/"* recovery-licenses/
+          cp -R initramfs-root/usr/share/doc/nativepipe-install recovery-licenses/
 
       - name: Assemble VZ-compatible initramfs
         run: |
@@ -328,4 +371,11 @@ jobs:
         with:
           name: lighthouse-initramfs-arm64
           path: lighthouse-initramfs-*-arm64.img
+          if-no-files-found: error
+
+      - name: Upload recovery license notices
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linuxkit-recovery-licenses
+          path: recovery-licenses
           if-no-files-found: error

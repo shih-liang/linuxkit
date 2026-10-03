@@ -62,3 +62,7 @@ checkout. See [guest builds and releases](guest-platform/README.md) and
 Dependency versions and checksums are recorded in `DEPENDENCY_VERSIONS` and
 `KERNEL_VERSION`. License information is in [`LICENSES/`](LICENSES/README.md)
 and the [guest notices](guest-platform/LICENSES/README.md).
+
+The LinPortal suite release is `0.2.0`, recorded in `RELEASE_VERSION`.
+The guest service follows this suite version. The upstream Linux kernel
+version remains independent.

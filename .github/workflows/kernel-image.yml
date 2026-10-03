@@ -65,7 +65,8 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "$KERNEL_RELEASE" --json assets --jq '.assets[].name' > release-assets.txt
-          if grep -Fxq "lighthouse-linux-${KERNEL_VERSION}-arm64-${PAGE_SIZE}k.Image" release-assets.txt; then
+          if grep -Fxq "lighthouse-linux-${KERNEL_VERSION}-arm64-${PAGE_SIZE}k.Image" release-assets.txt \
+              && grep -Fxq linuxkit-kernel-licenses.tar.gz release-assets.txt; then
             echo 'REUSE_KERNEL=true' >> "$GITHUB_ENV"
           fi
 
@@ -432,6 +433,17 @@ jobs:
           for file in System.map Module.symvers; do
             cp "linux-${KERNEL_VERSION}/$file" "artifact/${file}${suffix}"
           done
+          mkdir -p kernel-licenses
+          cp "linux-${KERNEL_VERSION}/COPYING" kernel-licenses/
+          cp -R "linux-${KERNEL_VERSION}/LICENSES" kernel-licenses/
+          {
+            printf '# Linux kernel source provenance\n\n'
+            printf 'Linux %s: https://cdn.kernel.org/pub/linux/kernel/v%s.x/linux-%s.tar.xz\n\n' "$KERNEL_VERSION" "${KERNEL_VERSION%%.*}" "$KERNEL_VERSION"
+            grep " linux-${KERNEL_VERSION}.tar.xz$" sha256sums.asc
+            printf '\nBuild configuration: https://github.com/%s/tree/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+            printf '\nKata configuration fragments: https://github.com/kata-containers/kata-containers/tree/%s/tools/packaging/kernel/configs/fragments\n' "$KATA_CONFIG_REF"
+          } > kernel-licenses/SOURCES.md
+          tar -C kernel-licenses -czf artifact/linuxkit-kernel-licenses.tar.gz .
 
       - name: Upload kernel output
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

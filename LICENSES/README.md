@@ -22,3 +22,10 @@ Release archives place all platform notices under
 `LICENSES/linuxkit-platform/`. The component namespace keeps a merged
 platform+display runtime free of duplicate license paths while this repository
 continues to keep its authoritative inventory at `LICENSES/source-inventory.json`.
+
+The ARM64 archive additionally includes `LICENSES/recovery/`, collected from
+the exact recovery build. It retains the BusyBox, e2fsprogs, util-linux,
+ncurses and installer static-library copyright notices, source package
+versions, and pinned upstream source links. The same notices are available
+inside the recovery image under `/usr/share/doc/nativepipe-recovery` and
+`/usr/share/doc/nativepipe-install`.

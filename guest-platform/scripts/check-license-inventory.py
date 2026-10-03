@@ -35,6 +35,7 @@ def matched(path: str, entry: dict[str, object]) -> bool:
 def platform_source_files() -> list[str]:
     paths = [
         ".github/workflows/build-linux.yml",
+        "RELEASE_VERSION",
         "scripts/sign-installation-catalog.py",
     ]
     for relative in ("LICENSES", "Resources", "adapters", "guest-platform"):

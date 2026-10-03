@@ -12,6 +12,7 @@
         "LICENSES/LightHouse-Original.txt",
         "LICENSES/README.md",
         "LICENSES/source-inventory.json",
+        "RELEASE_VERSION",
         "Resources/**",
         "adapters/**",
         "guest-platform/**",

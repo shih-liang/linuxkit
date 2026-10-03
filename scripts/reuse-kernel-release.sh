@@ -28,9 +28,11 @@ image="lighthouse-linux-${KERNEL_VERSION}-arm64-${page_size}k.Image"
 gh release download "$tag" --repo "$GH_REPO" --dir artifact \
     --pattern "$image" --pattern "config-aarch64${suffix}" --pattern "System.map${suffix}" \
     --pattern "Module.symvers${suffix}" --pattern SHA256SUMS
+gh release download "$tag" --repo "$GH_REPO" --dir artifact \
+    --pattern linuxkit-kernel-licenses.tar.gz
 (
     cd artifact
-    for name in "$image" "config-aarch64${suffix}" "System.map${suffix}" "Module.symvers${suffix}"; do
+    for name in "$image" "config-aarch64${suffix}" "System.map${suffix}" "Module.symvers${suffix}" linuxkit-kernel-licenses.tar.gz; do
         grep -F "  $name" SHA256SUMS | grep -E "  $name$"
     done | sha256sum --check --strict -
 )
