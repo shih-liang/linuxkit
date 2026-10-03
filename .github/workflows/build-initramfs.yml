@@ -289,7 +289,7 @@ jobs:
           # The cross compiler may use glibc/libgcc from cross packages rather
           # than the multiarch runtime. Keep the owners of the actual archives.
           for library in libc.a libgcc.a; do
-            archive=$("${CROSS_COMPILE}gcc" -print-file-name="$library")
+            archive=$(readlink -f "$("${CROSS_COMPILE}gcc" -print-file-name="$library")")
             package=$(dpkg-query -S "$archive" | sed 's/: \/.*$//' | head -n 1)
             test -n "$package"
             source="/usr/share/doc/$package/copyright"
