@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+<title id="title">LinuxKit repository logo</title>
+<desc id="desc">Illustrative preview using fictional sample data. This is a functional illustration, not a captured application screenshot.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#EFF7F3"/><stop offset="1" stop-color="#F4ECF0"/></linearGradient><linearGradient id="glass" x2="0" y2="1"><stop stop-color="#FFF"/><stop offset="1" stop-color="#F5F8F7"/></linearGradient></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-variant-ligatures:none} .mono{font-family:Menlo,Consolas,monospace}</style>
+<rect x="0" y="0" width="160" height="160" rx="24" fill="url(#bg)"/>
+<rect x="8" y="8" width="144" height="144" rx="30" fill="white" stroke="#D8E3DF"/>
+<rect x="43" y="43" width="75" height="75" rx="16" fill="#E4F2EB" stroke="#187A70"/>
+<path d="M59 29 L59 43" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M59 118 L59 132" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M29 59 L43 59" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M118 59 L132 59" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M80 29 L80 43" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M80 118 L80 132" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M29 80 L43 80" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M118 80 L132 80" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M101 29 L101 43" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M101 118 L101 132" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M29 101 L43 101" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M118 101 L132 101" stroke="#187A70" stroke-width="4" fill="none"/>
+<path d="M59 71 L72 81 L59 91 M82 94 L101 94" fill="none" stroke="#773D56" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

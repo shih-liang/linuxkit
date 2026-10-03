@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="720" viewBox="0 0 1160 720" role="img" aria-labelledby="title desc">
+<title id="title">LinuxKit guest installer terminal preview</title>
+<desc id="desc">Illustrative preview using fictional sample data. This is a functional illustration, not a captured application screenshot.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#EFF7F3"/><stop offset="1" stop-color="#F4ECF0"/></linearGradient><linearGradient id="glass" x2="0" y2="1"><stop stop-color="#FFF"/><stop offset="1" stop-color="#F5F8F7"/></linearGradient></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-variant-ligatures:none} .mono{font-family:Menlo,Consolas,monospace}</style>
+<rect x="0" y="0" width="1160" height="720" rx="24" fill="url(#bg)"/>
+<text xml:space="preserve" x="50" y="48" font-size="27" fill="#23302F" font-weight="600">Kernel, recovery and a shared C installer</text>
+<rect x="50" y="99" width="1060" height="548" rx="16" fill="#D9E3DF"/>
+<rect x="50" y="94" width="1060" height="548" rx="16" fill="#191F22" stroke="#C9D6D1"/>
+<rect x="51" y="95" width="1058" height="47" rx="15" fill="#252C30"/>
+<rect x="51" y="118" width="1058" height="24" rx="0" fill="#252C30"/>
+<path d="M50 142 L1110 142" stroke="#3A4246" stroke-width="1" fill="none"/>
+<circle cx="73" cy="118" r="6" fill="#F26865"/>
+<circle cx="95" cy="118" r="6" fill="#EEBA4B"/>
+<circle cx="117" cy="118" r="6" fill="#5CBB7A"/>
+<text xml:space="preserve" x="580.0" y="124" font-size="17" fill="#D8E5E0" font-weight="600" text-anchor="middle">Linux VM console — nativepipe-install</text>
+<text xml:space="preserve" x="79" y="183" font-size="20" fill="#E4EEE8" font-weight="400" class="mono">demo@linux:~$ nativepipe-install apps --list</text>
+<text xml:space="preserve" x="79" y="223" font-size="20" fill="#23302F" font-weight="400" class="mono"></text>
+<text xml:space="preserve" x="79" y="263" font-size="20" fill="#87C1AA" font-weight="400" class="mono">developer-tools   Developer Tools</text>
+<text xml:space="preserve" x="79" y="303" font-size="20" fill="#87C1AA" font-weight="400" class="mono">git               Git</text>
+<text xml:space="preserve" x="79" y="343" font-size="20" fill="#87C1AA" font-weight="400" class="mono">python            Python</text>
+<text xml:space="preserve" x="79" y="383" font-size="20" fill="#87C1AA" font-weight="400" class="mono">codex             Codex</text>
+<text xml:space="preserve" x="79" y="423" font-size="20" fill="#87C1AA" font-weight="400" class="mono">…                 More applications</text>
+<text xml:space="preserve" x="79" y="463" font-size="20" fill="#E4EEE8" font-weight="400" class="mono">demo@linux:~$ sudo nativepipe-install apps git python</text>
+<rect x="78" y="555" width="153" height="34" rx="8" fill="#E6F2ED"/>
+<text xml:space="preserve" x="154.5" y="578" font-size="16" fill="#187A70" font-weight="600" text-anchor="middle">C installer</text>
+<rect x="249" y="555" width="177" height="34" rx="8" fill="#E6F2ED"/>
+<text xml:space="preserve" x="337.5" y="578" font-size="16" fill="#187A70" font-weight="600" text-anchor="middle">Distro adapters</text>
+<rect x="444" y="555" width="195" height="34" rx="8" fill="#E6F2ED"/>
+<text xml:space="preserve" x="541.5" y="578" font-size="16" fill="#187A70" font-weight="600" text-anchor="middle">ARM64 / AMD64</text>
+<text xml:space="preserve" x="51" y="670" font-size="19" fill="#23302F" font-weight="400">Recovery initramfs → verified rootfs installation → guest services</text>
+<text xml:space="preserve" x="580.0" y="696" font-size="15" fill="#60716E" font-weight="400" text-anchor="middle">Illustrative preview · Fictional sample data</text>
+</svg>
