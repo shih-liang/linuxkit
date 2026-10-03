@@ -46,7 +46,7 @@ application's guest runtime.
 
 ### File operations
 
-guestd 0.2.39 serves NPFR v1 on vsock port 1025 (`fs.stream.v1`); the compositor
+guestd serves NPFR v1 on vsock port 1025 (`fs.stream.v1`); the compositor
 serves the identical library on port 1026 with its ordinary user's credentials.
 Both accept host CID 2 only. Root administration and user transfers are distinct
 endpoints: the protocol has no request field for changing UID/GID.
@@ -61,7 +61,7 @@ switching root. Bootstrap uses the same chunk framing for named NPAG artifacts.
 guestd does not mount the host shared-folder device at startup. After the
 handshake, LinPortal sends `NPSF` (request ID and one mounted/unmounted byte)
 over the existing binary control channel, according to the VM's configured
-folders. The capability is `fs.shared-folders` (guestd 0.2.38).
+folders. The capability is `fs.shared-folders`.
 The device remains attached even when empty; no folder means no mount.
 Removing the last folder requires a normal unmount before revoking the export.
 Busy mounts return an error, never a forced or lazy unmount.
