@@ -39,10 +39,27 @@ Init-only operations are:
 - `NPIM`: mount the exact identifier and partition selected by the host.
 - `NPIC`: boot, install, repair, or start a console shell.
 
+The interactive recovery shell starts in its own session and acquires the
+actual virtio console `/dev/hvc0` as its controlling terminal, with its process
+group in the foreground. `/dev/console` remains PID 1's logging endpoint.
+This supplies normal terminal input, foreground signals and shell job control;
+installer commands continue to use their existing noninteractive execution path.
+The host receives success only after the shell has successfully started. A
+terminal or executable error returns through recovery rather than powering off.
+
 Exiting the recovery console shell (including Ctrl+D) stops any remaining
 recovery jobs, unmounts filesystems, syncs writes, and powers off the VM. The
 host's normal guest-stopped callback closes its windows. Closing only the
 console window is not a shell exit and does not shut down the VM.
+
+The Linux self-test uses a real pseudoterminal and `/bin/sh` to verify the
+controlling session, foreground process group, Ctrl+Z suspension, `fg` resumption,
+and Ctrl+C delivery to an actual foreground child, then checks that the shell
+remains usable. Separate mocked
+shutdown checks cover shell exit statuses including 127 without signaling host
+processes, unmounting host filesystems or performing a real poweroff. The tests
+require `/dev/ptmx`, mounted `/dev/pts` and `/proc`, `/dev/tty`, `/bin/sh`, and the self-test
+executable itself; no external terminal utilities or additional shell are needed.
 
 For boot/install/repair, `NPOK` is sent only after the C installer completed, the
 root and its ELF/script interpreter passed preflight, and all runtime mounts

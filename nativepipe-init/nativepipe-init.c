@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
@@ -26,6 +27,7 @@
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <termios.h>
 #include <unistd.h>
 
 #define NP_INIT_PORT 1024u
@@ -36,6 +38,9 @@
 #define NP_TARGET_MEMORY_PATH "/run/nativepipe/target-memory-bytes"
 #define NP_NEW_ROOT "/newroot"
 #define NP_DEFAULT_ROOT_WAIT_MILLISECONDS UINT64_C(5000)
+#ifndef NP_RECOVERY_TTY
+#define NP_RECOVERY_TTY "/dev/hvc0"
+#endif
 
 #if defined(__aarch64__)
 #define NP_ELF_MACHINE EM_AARCH64
@@ -502,6 +507,17 @@ static int connect_to_host(void) {
     return connection;
 }
 
+static int wait_child(pid_t child) {
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR)
+            return -1;
+    }
+    /* PID 1 also owns package-manager daemon children after they exit. */
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+}
+
 static int run(char *const arguments[], char *const environment[]) {
     pid_t child = fork();
     if (child < 0)
@@ -511,14 +527,83 @@ static int run(char *const arguments[], char *const environment[]) {
         log_errno(arguments[0]);
         _exit(127);
     }
-    int status = 0;
-    while (waitpid(child, &status, 0) < 0) {
-        if (errno != EINTR)
-            return -1;
+    return wait_child(child);
+}
+
+static int attach_recovery_terminal(const char *path) {
+    if (setsid() < 0)
+        return -1;
+    /* /dev/console supplies logging, but cannot become a controlling tty.
+     * The VZ virtio console is the real hvc0 terminal. Never steal it from
+     * another session: TIOCSCTTY's zero argument deliberately forbids that. */
+    int terminal = open(path, O_RDWR | O_NOCTTY);
+    if (terminal < 0)
+        return -1;
+    if (ioctl(terminal, TIOCSCTTY, 0) < 0)
+        goto failed;
+    for (int target = STDIN_FILENO; target <= STDERR_FILENO; target++) {
+        if (dup2(terminal, target) < 0)
+            goto failed;
     }
-    /* PID 1 also owns package-manager daemon children after they exit. */
-    while (waitpid(-1, NULL, WNOHANG) > 0) {}
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    if (tcsetpgrp(terminal, getpgrp()) < 0)
+        goto failed;
+    if (terminal > STDERR_FILENO)
+        close(terminal);
+    return 0;
+failed:
+    {
+        int saved = errno;
+        if (terminal > STDERR_FILENO)
+            close(terminal);
+        errno = saved;
+        return -1;
+    }
+}
+
+static pid_t start_recovery_shell(const char *terminal_path) {
+    int errors[2];
+    if (pipe2(errors, O_CLOEXEC) < 0)
+        return -1;
+    pid_t child = fork();
+    if (child < 0) {
+        int saved = errno;
+        close(errors[0]);
+        close(errors[1]);
+        errno = saved;
+        return -1;
+    }
+    if (child == 0) {
+        close(errors[0]);
+        if (attach_recovery_terminal(terminal_path) == 0) {
+            /* PID 1 ignores SIGPIPE for its control transport. Interactive
+             * shell jobs should retain ordinary broken-pipe semantics. */
+            signal(SIGPIPE, SIG_DFL);
+            logmsg("Recovery shell. Type exit or press Ctrl+D to shut down this virtual machine.");
+            char *const arguments[] = {"/bin/sh", "-l", NULL};
+            execve(arguments[0], arguments, environ);
+        }
+        int saved = errno;
+        (void)write_full(errors[1], &saved, sizeof(saved));
+        errno = saved;
+        log_errno("start recovery shell");
+        _exit(127);
+    }
+    close(errors[1]);
+    int child_error = 0;
+    ssize_t count;
+    do { count = read(errors[0], &child_error, sizeof(child_error)); }
+    while (count < 0 && errno == EINTR);
+    int saved = errno;
+    close(errors[0]);
+    /* Successful exec closes the pipe. Setup/exec failure is distinct from
+     * an interactive shell that successfully starts and then exits with 127. */
+    if (count != 0) {
+        (void)wait_child(child);
+        errno = count == (ssize_t)sizeof(child_error) && child_error > 0
+            ? child_error : count < 0 ? saved : EIO;
+        return -1;
+    }
+    return child;
 }
 
 static int run_capture_line(char *const arguments[], char *output, size_t capacity) {
@@ -1174,12 +1259,18 @@ static int power_off_recovery(void) {
 static int execute_plan(struct np_plan *plan, int connection, bool *response_sent) {
     *response_sent = false;
     if (plan->action == NP_ACTION_SHELL) {
-        if (send_ack(connection, plan->request_id) < 0)
+        pid_t shell = start_recovery_shell(NP_RECOVERY_TTY);
+        if (shell < 0)
             return -1;
+        if (send_ack(connection, plan->request_id) < 0) {
+            int saved = errno;
+            kill(shell, SIGHUP);
+            (void)wait_child(shell);
+            errno = saved;
+            return -1;
+        }
         *response_sent = true;
-        logmsg("Recovery shell. Type exit or press Ctrl+D to shut down this virtual machine.");
-        char *const arguments[] = {"/bin/sh", "-l", NULL};
-        if (run(arguments, NULL) < 0)
+        if (wait_child(shell) < 0)
             return -1;
         return power_off_recovery();
     }
