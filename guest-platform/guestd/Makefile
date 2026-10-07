@@ -21,7 +21,7 @@ HOST_ENVIRONMENT_TEST := /tmp/nativepipe-environment-config-test
 HOST_SESSION_STACK_TEST := /tmp/nativepipe-session-stack-test
 HOST_SHARED_FOLDERS_TEST := /tmp/nativepipe-shared-folders-test
 
-.PHONY: all clean aarch64 x86_64 test test-console test-cloud-init test-environment test-session-stack test-shared-folders
+.PHONY: all clean aarch64 x86_64 test test-console test-cloud-init test-environment test-session-stack test-open-tool test-shared-folders
 
 all: aarch64 x86_64
 
@@ -34,7 +34,7 @@ dist/nativepipe-guestd-aarch64: nativepipe-guestd.c $(CONSOLE) console_config.h 
 dist/nativepipe-guestd-x86_64: nativepipe-guestd.c $(CONSOLE) console_config.h $(CLOUD_INIT) cloud_init_config.h $(ENVIRONMENT) environment_config.h $(SESSION_STACK) session_stack.h $(SHARED_FOLDERS) shared_folders.h $(COMMON) $(HEADERS) VERSION | dist
 	$(ZIG) cc -target x86_64-linux-musl $(CFLAGS) -o $@ nativepipe-guestd.c $(CONSOLE) $(CLOUD_INIT) $(ENVIRONMENT) $(SESSION_STACK) $(SHARED_FOLDERS) $(COMMON) -lutil
 
-test: test-console test-cloud-init test-environment test-session-stack
+test: test-console test-cloud-init test-environment test-session-stack test-open-tool
 
 test-console: console_config.c console_config.h tests/console_config_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I. -o $(HOST_TEST) console_config.c tests/console_config_test.c
@@ -54,6 +54,9 @@ test-session-stack: $(SESSION_STACK) session_stack.h tests/session_stack_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I. -o $(HOST_SESSION_STACK_TEST) \
 		$(SESSION_STACK) tests/session_stack_test.c
 	$(HOST_SESSION_STACK_TEST)
+
+test-open-tool:
+	HOST_CC='$(HOST_CC)' python3 tests/open_tool_test.py
 
 # Integration check: run as root inside Linux with the shared-folder device.
 test-shared-folders: $(SHARED_FOLDERS) shared_folders.h tests/shared_folders_test.c

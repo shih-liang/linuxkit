@@ -13,6 +13,7 @@
 #define NP_CID_ANY 0xFFFFFFFFu
 #define NP_PORT_CONTROL 1024u
 #define NP_PORT_AGENT 1029u
+#define NP_PORT_HOST_OPEN 1030u
 #define NP_PORT_SESSION_FIRST 2048u
 #define NP_PORT_SESSION_LAST 2303u
 
@@ -28,6 +29,8 @@
 #define NP_GUESTD_NAME "nativepipe-guestd"
 #define NP_INSTALLED_BIN "/usr/libexec/nativepipe/nativepipe-guestd"
 #define NP_INSTALLED_VERSION "/usr/libexec/nativepipe/VERSION"
+#define NP_OPEN_NAME "nativepipe-open"
+#define NP_INSTALLED_OPEN "/usr/local/bin/np-open"
 #define NP_SESSION_NAME "nativepipe-session"
 #define NP_INSTALLED_SESSION "/usr/libexec/nativepipe/nativepipe-session"
 #define NP_COMPOSITOR_MUSL_NAME "vmpipe-wayland-musl"
@@ -47,7 +50,9 @@
 #define NP_DESKTOP_PREFERENCES_FILE "/var/lib/nativepipe/desktop-preferences"
 #define NP_MAX_VERSION 256
 #define NP_MAX_NAME 256
-#define NP_MAX_AGENT_PAYLOAD (512ULL * 1024ULL * 1024ULL)
+/* Only APIs that materialize a payload in memory use this ceiling. File
+ * transfers retain their UInt64 length and stream through a fixed buffer. */
+#define NP_MAX_AGENT_MEMORY (512ULL * 1024ULL * 1024ULL)
 #define NP_MAX_NPIP_PAYLOAD (8u * 1024u * 1024u)
 
 int np_read_full(int fd, void *buf, size_t n);

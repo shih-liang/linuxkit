@@ -341,15 +341,10 @@ jobs:
           grep -Fxq '# CONFIG_MODULE_SIG is not set' .config
           grep -Fxq '# CONFIG_TRIM_UNUSED_KSYMS is not set' .config
           grep -Fxq 'CONFIG_LSM="landlock,yama,integrity,apparmor,selinux"' .config
-          # These classes are excluded by current LinPortal product policy,
-          # not because Virtualization.framework can never expose them.
-          for setting in \
-            '# CONFIG_MEDIA_SUPPORT is not set'; do
-            grep -Fxq "$setting" .config || {
-              echo "An intentionally unsupported product device class was enabled: $setting" >&2
-              exit 1
-            }
-          done
+          # Pass-through UVC cameras need V4L2 and USB audio for an integrated
+          # microphone in both page-size Images. Validate Linux's resolved
+          # dependencies, not just the fragment; no distro module tree is shipped.
+          python3 "$GITHUB_WORKSPACE/scripts/check-kernel-usb-video.py" .config
           # Keep only classes for which VZ has no transport and USB pass-through
           # cannot make the underlying platform bus visible to the guest.
           for setting in \

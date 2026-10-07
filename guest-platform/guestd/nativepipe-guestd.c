@@ -1170,8 +1170,56 @@ static const char *libc_artifact_name(const char *musl, const char *gnu) {
     return rootfs_uses_musl() ? musl : gnu;
 }
 
+/* np-open asks the Mac to open a URL or file. It is a convenience, not part of
+ * the display stack: a host that does not publish it, or a failed transfer,
+ * must never keep the graphical session from installing. So it is fetched on
+ * its own, replaced atomically, and any failure is only logged. */
+enum { NP_OPEN_NEEDED, NP_OPEN_INSTALLING, NP_OPEN_READY };
+static atomic_int open_tool_state = NP_OPEN_NEEDED;
+
+static int ensure_open_tool(void) {
+    char staging[sizeof(NP_INSTALLED_OPEN) + 32];
+    char version[NP_MAX_VERSION];
+    if (np_mkdir_p("/usr/local/bin") < 0)
+        return 0;
+    snprintf(staging, sizeof(staging), "%s.nativepipe-stage.%ld",
+             NP_INSTALLED_OPEN, (long)getpid());
+    unlink(staging);
+    int rc = np_agent_pull_file_mode_n(NP_OPEN_NAME, "", staging, 0755,
+                                       version, sizeof(version), 2);
+    if (rc == 0 && rename(staging, NP_INSTALLED_OPEN) == 0) {
+        logmsg("installed np-open");
+        return 1;
+    }
+    /* 2 means the host does not publish it, which is not worth a warning. */
+    if (rc != 2)
+        logmsg("could not install np-open; the graphical session is unaffected");
+    unlink(staging);
+    return 0;
+}
+
+static void *open_tool_thread(void *unused) {
+    (void)unused;
+    atomic_store(&open_tool_state, ensure_open_tool() ? NP_OPEN_READY : NP_OPEN_NEEDED);
+    return NULL;
+}
+
+/* One optional worker at a time. Failed pulls remain eligible for the next
+ * session preparation without delaying an already running display stack. */
+static void ensure_open_tool_async(void) {
+    int expected = NP_OPEN_NEEDED;
+    if (!atomic_compare_exchange_strong(&open_tool_state, &expected, NP_OPEN_INSTALLING))
+        return;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, open_tool_thread, NULL) == 0)
+        pthread_detach(thread);
+    else
+        atomic_store(&open_tool_state, NP_OPEN_NEEDED);
+}
+
 /* Pull a complete display generation before restarting the empty greeter. */
 static void ensure_session_stack(void) {
+    ensure_open_tool_async();
     pthread_mutex_lock(&session_stack_lock);
     if (session_stack_ready) {
         pthread_mutex_unlock(&session_stack_lock);

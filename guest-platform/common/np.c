@@ -365,10 +365,6 @@ int np_agent_recv_hdr(int fd, np_agent_hdr *hdr) {
         for (int i = 0; i < 8; i++)
             n |= ((uint64_t)lenbuf[i]) << (8 * i);
         hdr->payload_len = n;
-        if (n == 0 || n > NP_MAX_AGENT_PAYLOAD) {
-            errno = EMSGSIZE;
-            return -1;
-        }
     }
     return 0;
 }
@@ -391,10 +387,6 @@ int np_agent_recv_payload_file(int fd, uint64_t len, const char *path, int mode)
      * could truncate each other. A unique adjacent file is both race-safe and
      * guaranteed to be on the rename target's filesystem.
      */
-    if (len == 0) {
-        errno = EINVAL;
-        return -1;
-    }
     if (mkdir_parent(path) < 0)
         return -1;
     char tmp[640];
@@ -432,8 +424,8 @@ int np_agent_recv_payload_file(int fd, uint64_t len, const char *path, int mode)
 }
 
 int np_agent_recv_payload_mem(int fd, uint64_t len, uint8_t **out, size_t *out_len) {
-    if (!len || len > NP_MAX_AGENT_PAYLOAD || len > SIZE_MAX) { errno = EMSGSIZE; return -1; }
-    uint8_t *buf = malloc((size_t)len);
+    if (len > NP_MAX_AGENT_MEMORY || len > SIZE_MAX) { errno = EMSGSIZE; return -1; }
+    uint8_t *buf = malloc(len ? (size_t)len : 1);
     if (!buf)
         return -1;
     uint64_t total = 0;

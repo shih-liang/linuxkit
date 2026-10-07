@@ -58,6 +58,8 @@ Kernel and initramfs builds run in the release workflows. The root Makefile's
 these boot resources and packages the separately built guest runtime from this
 checkout. See [guest builds and releases](guest-platform/README.md) and
 [recovery and kernel workflows](nativepipe-init/README.md).
+The [kernel capability and driver delivery guide](docs/kernel-capabilities.md)
+describes USB classes, VM devices, software features and their runtime limits.
 
 Dependency versions and checksums are recorded in `DEPENDENCY_VERSIONS` and
 `KERNEL_VERSION`. License information is in [`LICENSES/`](LICENSES/README.md)
