@@ -549,12 +549,6 @@ int np_npip_send(int fd, const void *json, size_t json_len) {
         errno = EMSGSIZE;
         return -1;
     }
-    uint8_t hdr[8];
-    memcpy(hdr, NP_NPIP_MAGIC, 4);
-    hdr[4] = NP_WIRE_VERSION;
-    hdr[5] = 0;
-    hdr[6] = 0;
-    hdr[7] = 0;
     uint32_t n = (uint32_t)json_len;
     /* payload length is u32 LE at offset 8 in the 12-byte header:
        "NPIP" | version(1) | 3 reserved | length(u32 LE) */
@@ -568,7 +562,6 @@ int np_npip_send(int fd, const void *json, size_t json_len) {
     frame[9] = (uint8_t)((n >> 8) & 0xff);
     frame[10] = (uint8_t)((n >> 16) & 0xff);
     frame[11] = (uint8_t)((n >> 24) & 0xff);
-    (void)hdr;
     if (np_write_full(fd, frame, sizeof(frame)) < 0)
         return -1;
     return np_write_full(fd, json, json_len);
