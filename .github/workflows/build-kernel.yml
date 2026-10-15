@@ -14,6 +14,11 @@ on:
         required: false
         default: ""
         type: string
+      verify_only:
+        description: Verify an existing release without building or publishing
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -25,15 +30,20 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       kernel_version: ${{ steps.release.outputs.kernel_version }}
       revision: ${{ steps.release.outputs.revision }}
+      already_published: ${{ steps.release.outputs.already_published }}
     steps:
       - name: Check out configuration
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      - name: Test release verification
+        run: python3 scripts/test-verify-kernel-release.py
 
       - name: Validate release
         id: release
@@ -41,6 +51,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          VERIFY_ONLY: ${{ inputs.verify_only || false }}
         run: |
           set -euo pipefail
           kernel_version="$(tr -d '[:space:]' < KERNEL_VERSION)"
@@ -48,35 +59,37 @@ jobs:
           prefix="lighthouse-kernel-v${kernel_version}-"
           revision="${RELEASE_TAG#"$prefix"}"
           [[ "$RELEASE_TAG" != "$revision" && "$revision" =~ ^[1-9][0-9]*$ ]]
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists." >&2
-            exit 1
+          verification=(--expected-commit "$GITHUB_SHA")
+          if [ "$VERIFY_ONLY" = true ]; then
+            verification=(--require-existing)
           fi
-          if tagged_sha="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null)"; then
-            if [ "$tagged_sha" != "$GITHUB_SHA" ]; then
-              echo "::error::Tag $RELEASE_TAG already points to $tagged_sha, not this build ($GITHUB_SHA). Choose a new release revision."
-              exit 1
-            fi
-          fi
+          published="$(python3 scripts/verify-kernel-release.py "$RELEASE_TAG" "${verification[@]}")"
           {
             echo "tag=$RELEASE_TAG"
             echo "kernel_version=$kernel_version"
             echo "revision=$revision"
+            echo "already_published=$published"
           } >> "$GITHUB_OUTPUT"
+          if [ "$published" = true ]; then
+            echo "Release $RELEASE_TAG is complete and verified; no rebuild or replacement is needed."
+          fi
 
   kernel:
     needs: prepare
+    if: needs.prepare.outputs.already_published != 'true'
     uses: ./.github/workflows/kernel-image.yml
     with:
       reuse_release: ${{ inputs.kernel_release || '' }}
 
   initramfs:
     needs: prepare
+    if: needs.prepare.outputs.already_published != 'true'
     uses: ./.github/workflows/build-initramfs.yml
 
   release:
     name: Publish verified prerelease
     needs: [prepare, kernel, initramfs]
+    if: needs.prepare.outputs.already_published != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -133,18 +146,13 @@ jobs:
       - name: Publish immutable prerelease
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists; refusing to replace it." >&2
-            exit 1
+          published="$(python3 scripts/verify-kernel-release.py "$RELEASE_TAG" --expected-commit "$GITHUB_SHA")"
+          if [ "$published" = true ]; then
+            echo "Release $RELEASE_TAG was already published and verified; keeping it unchanged."
+            exit 0
           fi
-          if tagged_sha="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha 2>/dev/null)"; then
-            if [ "$tagged_sha" != "$GITHUB_SHA" ]; then
-              echo "::error::Tag $RELEASE_TAG points to $tagged_sha, not this build ($GITHUB_SHA); refusing to replace it."
-              exit 1
-            fi
-          elif [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
-            echo "Release tag $RELEASE_TAG is missing." >&2
-            exit 1
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha >/dev/null
           fi
           gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
             --draft --generate-notes \

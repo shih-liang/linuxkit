@@ -147,11 +147,17 @@ change, run the publication workflow with a new `release_tag` and an existing
 
 ```sh
 gh workflow run build-kernel.yml --ref main \
-  -f release_tag=lighthouse-kernel-v6.18.48-8 \
-  -f kernel_release=lighthouse-kernel-v6.18.48-4
+  -f release_tag=lighthouse-kernel-v6.18.56-2 \
+  -f kernel_release=lighthouse-kernel-v6.18.56-1
 ```
 
 Kernel reuse requires the same Linux version, `config-aarch64` and Kata
 configuration revision, and verifies the downloaded kernel artifacts against
 the release checksums. Leave `kernel_release` empty to rebuild Linux. Neither
 path builds the kernel or initramfs on the local macOS host.
+
+If that tag already has a published release at the same commit, the workflow
+downloads and verifies all release assets, then skips building and publishing.
+Drafts, incomplete releases, checksum failures and commit mismatches still fail.
+To check an existing release from the current workflow without rebuilding it
+or changing its tag, dispatch with `release_tag` and `verify_only=true`.
