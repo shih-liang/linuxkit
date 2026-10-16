@@ -71,6 +71,17 @@ Inside a Linux VM with the shared-folder device, root can run
 only inside a private mount namespace and checks idempotence, busy files and
 refusal to unmount an unrelated filesystem.
 
+### Drop mounts
+
+guestd listens on `/run/nativepipe/drops.sock` for the compositor's drop file
+service. For each request it takes the caller's UID/GID from `SO_PEERCRED`,
+mounts a FUSE filesystem at `/run/nativepipe/drops/<uid>` and hands the
+`/dev/fuse` descriptor back with `SCM_RIGHTS`; the compositor serves it for the
+host as the ordinary user. Mount points are root-owned and never in a directory
+the user controls; root callers are refused; a newer request for the same user
+detaches the previous mount. The protocol is described in NativePipe's
+`common/file_rpc/README.md` ("Drop files").
+
 ## GitHub releases
 
 Tags matching `linuxkit-guest-v*` publish one archive per architecture.

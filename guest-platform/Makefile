@@ -17,6 +17,7 @@ GUESTD_SOURCES := \
 	guestd/environment_config.c \
 	guestd/session_stack.c \
 	guestd/shared_folders.c \
+	guestd/drop_mounts.c \
 	$(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c
 GUESTD_HEADERS := \
 	common/os_release.h common/rosetta.h \
@@ -24,7 +25,9 @@ GUESTD_HEADERS := \
 	guestd/cloud_init_config.h \
 	guestd/environment_config.h \
 	guestd/session_stack.h \
-	guestd/shared_folders.h
+	guestd/shared_folders.h \
+	guestd/drop_mounts.h \
+	$(FILE_RPC_DIR)/np_drop_fs.h $(FILE_RPC_DIR)/np_file_session.h
 TARGET_CFLAGS := -std=c11 -Icommon -I$(FILE_RPC_DIR) -O2 -static -s
 GUESTD_CFLAGS := $(TARGET_CFLAGS) -pthread -DNP_GUESTD_VERSION=\"$(VERSION)\"
 HOST_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -O2
