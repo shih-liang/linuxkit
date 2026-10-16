@@ -11,6 +11,7 @@
 #include "environment_config.h"
 #include "session_stack.h"
 #include "shared_folders.h"
+#include "drop_mounts.h"
 #include "exec_stream.h"
 #include "os_release.h"
 #include "rosetta.h"
@@ -2895,6 +2896,9 @@ int main(int argc, char **argv) {
         pthread_create(&th, NULL, session_stack_thread, NULL);
         pthread_detach(th);
     }
+    /* Drag-and-drop editing degrades to copies without it; not fatal. */
+    if (geteuid() == 0 && np_drop_mounts_start() < 0)
+        logmsg("cannot start drop mounts");
     struct np_file_service *files = np_file_service_start(NP_FILE_ROOT_PORT, "/");
     if (!files) { logmsg("cannot start root file service"); return 1; }
     int result = listen_control();
