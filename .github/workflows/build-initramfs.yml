@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
         with:
           repository: shih-liang/nativepipe
-          ref: 3be550af70a245a2bebe541fbfdc894fd16a663e
+          ref: f4a63de64cd96bc2218e7c927a6c0bb4556ca37b
           path: .deps/nativepipe
           sparse-checkout: common/file_rpc
           persist-credentials: false
