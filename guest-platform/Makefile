@@ -18,7 +18,7 @@ GUESTD_SOURCES := \
 	guestd/session_stack.c \
 	guestd/shared_folders.c \
 	guestd/drop_mounts.c \
-	$(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c
+	$(FILE_RPC_DIR)/np_file_server.c $(FILE_RPC_DIR)/np_file_service.c $(FILE_RPC_DIR)/np_file_session.c
 GUESTD_HEADERS := \
 	common/os_release.h common/rosetta.h \
 	guestd/console_config.h guestd/exec_stream.h \
