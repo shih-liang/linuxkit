@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "np.h"
 #include "fd_range.h"
-#include "np_file_rpc.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -322,7 +321,7 @@ int np_agent_send_request(int fd, const char *name, const char *ver) {
     uint8_t hdr[8];
     memcpy(hdr, NP_AGENT_MAGIC, 4);
     hdr[4] = NP_AGENT_WIRE_VERSION;
-    hdr[5] = 1; /* Request the shared NPFR chunked payload. */
+    hdr[5] = 0; /* The payload is exactly payload_len raw bytes. */
     hdr[6] = (uint8_t)(name_len & 0xff);
     hdr[7] = (uint8_t)((name_len >> 8) & 0xff);
     uint8_t ver_len_buf[2] = {(uint8_t)(ver_len & 0xff), (uint8_t)((ver_len >> 8) & 0xff)};
@@ -369,6 +368,17 @@ int np_agent_recv_hdr(int fd, np_agent_hdr *hdr) {
     return 0;
 }
 
+/* Moves exactly `len` payload bytes; an early EOF is a truncated payload. */
+static int copy_exact(int fd, int out, uint64_t len) {
+    unsigned char bytes[16384];
+    while (len) {
+        size_t size = len < sizeof(bytes) ? (size_t)len : sizeof(bytes);
+        if (np_read_full(fd, bytes, size) < 0 || np_write_full(out, bytes, size) < 0) return -1;
+        len -= size;
+    }
+    return 0;
+}
+
 static int mkdir_parent(const char *path) {
     char dir[512];
     snprintf(dir, sizeof(dir), "%s", path);
@@ -398,8 +408,7 @@ int np_agent_recv_payload_file(int fd, uint64_t len, const char *path, int mode)
     if (out < 0)
         return -1;
     fcntl(out, F_SETFD, FD_CLOEXEC);
-    uint64_t received = 0;
-    if (np_file_receive_stream(fd, out, len, &received) < 0 || received != len) {
+    if (copy_exact(fd, out, len) < 0) {
         int error = errno ? errno : EPROTO;
         close(out); unlink(tmp); errno = error; return -1;
     }
@@ -428,18 +437,7 @@ int np_agent_recv_payload_mem(int fd, uint64_t len, uint8_t **out, size_t *out_l
     uint8_t *buf = malloc(len ? (size_t)len : 1);
     if (!buf)
         return -1;
-    uint64_t total = 0;
-    struct np_file_frame frame;
-    for (;;) {
-        if (np_file_receive(fd, &frame) < 0) { free(buf); return -1; }
-        if (frame.status) { free(buf); errno = (int)frame.status; return -1; }
-        if (frame.type == NP_FILE_END && frame.length == 8 && total == len &&
-            np_file_u64(frame.data) == total) break;
-        if (frame.type != NP_FILE_DATA || !frame.length || frame.length > len - total) {
-            free(buf); errno = EPROTO; return -1;
-        }
-        memcpy(buf + total, frame.data, frame.length); total += frame.length;
-    }
+    if (np_read_full(fd, buf, (size_t)len) < 0) { int error = errno; free(buf); errno = error; return -1; }
     *out = buf;
     *out_len = (size_t)len;
     return 0;
@@ -448,10 +446,8 @@ int np_agent_recv_payload_mem(int fd, uint64_t len, uint8_t **out, size_t *out_l
 int np_agent_discard_payload(int fd, uint64_t len) {
     int out = open("/dev/null", O_WRONLY | O_CLOEXEC);
     if (out < 0) return -1;
-    uint64_t received = 0;
-    int rc = np_file_receive_stream(fd, out, len, &received);
+    int rc = copy_exact(fd, out, len);
     int error = errno; close(out); errno = error;
-    if (rc == 0 && received != len) { errno = EPROTO; return -1; }
     return rc;
 }
 

@@ -1,5 +1,4 @@
 #include "np.h"
-#include "np_file_rpc.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -55,15 +54,13 @@ static void *write_payload(void *opaque) {
     t->write_rc = 0;
     while (left > 0) {
         size_t chunk = left > sizeof(block) ? sizeof(block) : left;
-        if (np_file_send(t->write_fd, NP_FILE_DATA, 0, 0, block, chunk) < 0) {
+        if (np_write_full(t->write_fd, block, chunk) < 0) {
             t->write_rc = -1;
             break;
         }
         left -= chunk;
         sched_yield();
     }
-    unsigned char end[8]; np_file_put64(end, PAYLOAD_SIZE - left);
-    if (t->write_rc == 0) t->write_rc = np_file_send(t->write_fd, NP_FILE_END, 0, 0, end, sizeof(end));
     close(t->write_fd);
     return NULL;
 }
