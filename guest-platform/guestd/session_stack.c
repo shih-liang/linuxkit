@@ -1,6 +1,7 @@
 #include "session_stack.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -97,6 +98,49 @@ int np_session_stack_finish_file(struct np_session_stack_file_state *state) {
     return 0;
 }
 
+int np_session_stack_same_file(const char *staging_path, const char *destination,
+                               int mode) {
+    int staged = open(staging_path, O_RDONLY | O_CLOEXEC);
+    if (staged < 0)
+        return -1;
+    int current = open(destination, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (current < 0) {
+        int saved = errno;
+        close(staged);
+        if (saved == ENOENT || saved == ELOOP)
+            return 0;
+        errno = saved;
+        return -1;
+    }
+    struct stat a, b;
+    int result = 0;
+    if (fstat(staged, &a) < 0 || fstat(current, &b) < 0) {
+        result = -1;
+    } else if (S_ISREG(b.st_mode) && a.st_size == b.st_size &&
+               (int)(b.st_mode & 07777) == mode) {
+        char left[16384], right[16384];
+        result = 1;
+        for (;;) {
+            ssize_t n = read(staged, left, sizeof(left));
+            if (n < 0) { result = -1; break; }
+            if (n == 0) break;
+            ssize_t m = 0;
+            while (m < n) {
+                ssize_t got = read(current, right + m, (size_t)(n - m));
+                if (got <= 0) { result = got < 0 ? -1 : 0; break; }
+                m += got;
+            }
+            if (result != 1) break;
+            if (memcmp(left, right, (size_t)n) != 0) { result = 0; break; }
+        }
+    }
+    int saved = errno;
+    close(staged);
+    close(current);
+    errno = saved;
+    return result;
+}
+
 static int run_systemd(const struct np_session_stack_operations *operations) {
     const char *reload[] = {"systemctl", "daemon-reload", NULL};
     const char *enable[] = {
@@ -124,13 +168,30 @@ static int run_openrc(const struct np_session_stack_operations *operations) {
     return operations->run(operations->context, restart) == 0 ? 0 : -1;
 }
 
+/* Nothing was replaced: keep a running session and its applications. */
+static int start_unchanged(enum np_session_stack_service service,
+                           const struct np_session_stack_operations *operations) {
+    const char *systemd[] = {
+        "systemctl", "start", "nativepipe-session.service", NULL,
+    };
+    const char *openrc[] = {
+        "rc-service", "nativepipe-session", "start", NULL,
+    };
+    return operations->run(operations->context,
+                           service == NP_SESSION_STACK_SYSTEMD ? systemd : openrc) == 0
+        ? 0 : -1;
+}
+
 static int rollback_artifacts(
     const struct np_session_stack_artifact *artifacts,
     size_t count,
+    const unsigned char *changed,
     const struct np_session_stack_operations *operations) {
     int failed = 0;
     while (count > 0) {
         count--;
+        if (!changed[count])
+            continue;
         if (operations->rollback(
                 operations->context, &artifacts[count], count) != 0)
             failed = 1;
@@ -166,6 +227,7 @@ int np_session_stack_apply(
     enum np_session_stack_service service,
     const struct np_session_stack_operations *operations) {
     if (!artifacts || artifact_count == 0 ||
+        artifact_count > NP_SESSION_STACK_MAX_ARTIFACTS ||
         (service != NP_SESSION_STACK_SYSTEMD &&
          service != NP_SESSION_STACK_OPENRC) || !operations ||
         !operations->stage || !operations->commit || !operations->rollback ||
@@ -185,15 +247,30 @@ int np_session_stack_apply(
             return -1;
         }
     }
+    unsigned char changed[NP_SESSION_STACK_MAX_ARTIFACTS];
+    size_t changed_count = 0;
     for (size_t index = 0; index < artifact_count; index++) {
+        changed[index] = !operations->unchanged ||
+            operations->unchanged(operations->context, &artifacts[index], index) != 1;
+        if (changed[index])
+            changed_count++;
+        else
+            operations->discard(operations->context, &artifacts[index], index);
+    }
+    if (changed_count == 0)
+        return start_unchanged(service, operations);
+    for (size_t index = 0; index < artifact_count; index++) {
+        if (!changed[index])
+            continue;
         if (operations->commit(
                 operations->context, &artifacts[index], index) != 0) {
             int commit_errno = errno ? errno : EIO;
             for (size_t pending = index; pending < artifact_count; pending++)
-                operations->discard(
-                    operations->context, &artifacts[pending], pending);
+                if (changed[pending])
+                    operations->discard(
+                        operations->context, &artifacts[pending], pending);
             int rollback_failed = rollback_artifacts(
-                artifacts, index + 1, operations) != 0;
+                artifacts, index + 1, changed, operations) != 0;
             errno = rollback_failed ? EIO : commit_errno;
             return -1;
         }
@@ -203,7 +280,7 @@ int np_session_stack_apply(
     if (service_result != 0) {
         int service_errno = errno ? errno : EIO;
         int rollback_failed = rollback_artifacts(
-            artifacts, artifact_count, operations) != 0;
+            artifacts, artifact_count, changed, operations) != 0;
         int restore_failed = service == NP_SESSION_STACK_SYSTEMD
             ? restore_systemd(operations) != 0
             : restore_openrc(operations) != 0;
@@ -211,6 +288,7 @@ int np_session_stack_apply(
         return -1;
     }
     for (size_t index = 0; index < artifact_count; index++)
-        operations->finish(operations->context, &artifacts[index], index);
+        if (changed[index])
+            operations->finish(operations->context, &artifacts[index], index);
     return 0;
 }

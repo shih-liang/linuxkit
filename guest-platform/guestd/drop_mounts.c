@@ -14,10 +14,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
-#include <sys/vfs.h>
 #include <unistd.h>
-
-#define FUSE_SUPER_MAGIC 0x65735546
 
 /* Mount points live under root-owned /run/nativepipe, never in a directory
  * the user controls, so no symbolic link can redirect where root mounts. */
@@ -34,12 +31,20 @@ static int mount_for(uid_t uid, gid_t gid, char *path, size_t capacity) {
     if ((size_t)snprintf(path, capacity, "%s/%u", NP_DROP_MOUNT_ROOT, (unsigned)uid) >= capacity) {
         errno = ENAMETOOLONG; return -1;
     }
-    if (root_owned_directory(path) < 0) return -1;
     /* The newest session wins: a previous daemon's mount (alive or aborted)
-     * is detached, and its open files keep their old connection. */
-    struct statfs fs;
-    for (int i = 0; i < 8 && statfs(path, &fs) == 0 && fs.f_type == FUSE_SUPER_MAGIC; i++)
-        if (umount2(path, MNT_DETACH) < 0) return -1;
+     * is detached first, and its open files keep their old connection. Never
+     * look inside it: without allow_other the kernel refuses even root, so
+     * lstat/stat on the mount point fail with EACCES. umount2 only resolves
+     * the mount point; EINVAL means nothing is mounted there any more. */
+    for (int i = 0;; i++) {
+        if (umount2(path, MNT_DETACH | UMOUNT_NOFOLLOW) == 0) {
+            if (i == 8) { errno = EBUSY; return -1; }
+            continue;
+        }
+        if (errno == EINVAL || errno == ENOENT) break;
+        return -1;
+    }
+    if (root_owned_directory(path) < 0) return -1;
     int fuse = open("/dev/fuse", O_RDWR | O_CLOEXEC);
     if (fuse < 0) return -1;
     char options[160];

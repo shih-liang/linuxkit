@@ -31,6 +31,12 @@ int np_session_stack_rollback_file(
     const struct np_session_stack_artifact *artifact,
     struct np_session_stack_file_state *state);
 int np_session_stack_finish_file(struct np_session_stack_file_state *state);
+/* 1 when destination is a regular file with the staged bytes and the given
+ * permission bits, 0 when it differs or is missing, -1 on a read error. */
+int np_session_stack_same_file(const char *staging_path, const char *destination,
+                               int mode);
+
+#define NP_SESSION_STACK_MAX_ARTIFACTS 16
 
 struct np_session_stack_operations {
     int (*stage)(void *context, const struct np_session_stack_artifact *artifact,
@@ -46,6 +52,9 @@ struct np_session_stack_operations {
     void (*discard)(void *context, const struct np_session_stack_artifact *artifact,
                     size_t index);
     int (*run)(void *context, const char *const arguments[]);
+    /* Optional: 1 when the staged artifact already equals its destination. */
+    int (*unchanged)(void *context, const struct np_session_stack_artifact *artifact,
+                     size_t index);
     void *context;
 };
 
@@ -57,6 +66,9 @@ struct np_session_stack_operations {
  * every commit succeeds, the selected supervisor is reloaded and restarted.
  * Only then does finish discard backups. A supervisor failure rolls every
  * target back in reverse order and reloads/restarts the restored service.
+ * Artifacts that already equal their destination are discarded, not
+ * committed. When none changed, the running session is left alone: the
+ * service is only started, which does nothing if it already runs.
  */
 int np_session_stack_apply(
     const struct np_session_stack_artifact *artifacts,

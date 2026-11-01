@@ -61,9 +61,7 @@ int main(void) {
 
     int stream[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, stream) == 0);
-    unsigned char end[8]; np_file_put64(end, 3);
-    assert(np_file_send(stream[1], NP_FILE_DATA, 0, 0, "abc", 3) == 0);
-    assert(np_file_send(stream[1], NP_FILE_END, 0, 0, end, sizeof(end)) == 0);
+    assert(np_write_full(stream[1], "abc", 3) == 0);
     unsigned char *output = NULL;
     size_t output_length = 0;
     assert(np_agent_recv_payload_mem(stream[0], 3, &output, &output_length) == 0);
@@ -71,7 +69,8 @@ int main(void) {
     free(output);
     close(stream[0]); close(stream[1]);
 
-    /* A zero-byte header still requires the NPFR END(0); EOF is incomplete. */
+    /* The payload is exactly its announced length: a zero-byte payload needs
+     * nothing more, and a short one leaves the old file in place. */
     char directory[] = "/tmp/nativepipe-empty-receive.XXXXXX";
     assert(mkdtemp(directory));
     char destination[256];
@@ -81,12 +80,12 @@ int main(void) {
         assert(socketpair(AF_UNIX, SOCK_STREAM, 0, stream) == 0);
         unsigned char header_bytes[16] = {'N', 'P', 'A', 'G', NP_AGENT_WIRE_VERSION,
                                          NP_STATUS_FILE, 0, 0};
+        np_file_put64(header_bytes + 8, complete ? 0 : 3);
         assert(np_write_full(stream[1], header_bytes, sizeof(header_bytes)) == 0);
-        np_file_put64(end, 0);
-        if (complete) assert(np_file_send(stream[1], NP_FILE_END, 0, 0, end, sizeof(end)) == 0);
+        if (!complete) assert(np_write_full(stream[1], "ab", 2) == 0);
         close(stream[1]);
         np_agent_hdr header;
-        assert(np_agent_recv_hdr(stream[0], &header) == 0 && header.payload_len == 0);
+        assert(np_agent_recv_hdr(stream[0], &header) == 0 && header.payload_len == (complete ? 0 : 3));
         int result = np_agent_recv_payload_file(stream[0], header.payload_len, destination, 0644);
         assert(result == (complete ? 0 : -1));
         close(stream[0]);
@@ -96,21 +95,20 @@ int main(void) {
     }
     assert(unlink(destination) == 0 && rmdir(directory) == 0);
 
-    /* Even an empty memory result consumes and validates END's exact count. */
-    for (int valid_end = 0; valid_end < 2; valid_end++) {
+    /* Memory receives are exact as well. */
+    for (int complete = 0; complete < 2; complete++) {
         assert(socketpair(AF_UNIX, SOCK_STREAM, 0, stream) == 0);
-        np_file_put64(end, valid_end ? 0 : 1);
-        assert(np_file_send(stream[1], NP_FILE_END, 0, 0, end, sizeof(end)) == 0);
+        if (!complete) assert(np_write_full(stream[1], "a", 1) == 0);
+        close(stream[1]);
         output = NULL; output_length = 0;
-        errno = 0;
-        int result = np_agent_recv_payload_mem(stream[0], 0, &output, &output_length);
-        assert(result == (valid_end ? 0 : -1));
-        if (valid_end) {
+        int result = np_agent_recv_payload_mem(stream[0], complete ? 0 : 2, &output, &output_length);
+        assert(result == (complete ? 0 : -1));
+        if (complete) {
             assert(output != NULL && output_length == 0);
             free(output);
-        } else assert(errno == EPROTO && output == NULL);
-        close(stream[0]); close(stream[1]);
+        } else assert(output == NULL);
+        close(stream[0]);
     }
-    puts("NPAG UInt64 headers, bounded memory and complete empty NPFR receives PASS");
+    puts("NPAG UInt64 headers, bounded memory and exact payload receives PASS");
     return 0;
 }

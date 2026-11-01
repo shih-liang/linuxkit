@@ -1144,6 +1144,16 @@ static void discard_session_artifact(
     }
 }
 
+static int unchanged_session_artifact(
+    void *opaque, const struct np_session_stack_artifact *artifact,
+    size_t index) {
+    struct session_stack_install_context *context = opaque;
+    if (index >= NP_SESSION_STACK_ARTIFACT_COUNT || context->staging[index][0] == '\0')
+        return 0;
+    return np_session_stack_same_file(context->staging[index], artifact->destination,
+                                      artifact->mode);
+}
+
 static int run_session_stack_command(void *context,
                                      const char *const arguments[]) {
     (void)context;
@@ -1277,6 +1287,7 @@ static void ensure_session_stack(void) {
         .finish = finish_session_artifact,
         .discard = discard_session_artifact,
         .run = run_session_stack_command,
+        .unchanged = unchanged_session_artifact,
         .context = &install_context,
     };
     if (np_session_stack_apply(

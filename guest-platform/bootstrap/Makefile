@@ -4,8 +4,8 @@
 
 ZIG ?= zig
 FILE_RPC_DIR ?= $(abspath ../../../nativepipe/common/file_rpc)
-COMMON := ../common/np.c $(FILE_RPC_DIR)/np_file_wire.c
-HEADERS := ../common/np.h $(FILE_RPC_DIR)/np_file_rpc.h
+COMMON := ../common/np.c
+HEADERS := ../common/np.h
 CFLAGS := -I../common -I$(FILE_RPC_DIR) -O2 -static -s
 
 .PHONY: all clean aarch64 x86_64

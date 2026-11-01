@@ -22,6 +22,7 @@ struct fake_operations {
     int run_attempts;
     int run_attempts_at_first_finish;
     int restart_attempts;
+    unsigned unchanged_mask;
     int target_generation[4];
     int rollback_order[8];
     char commands[8][128];
@@ -76,7 +77,8 @@ static int fake_commit(void *context,
                        size_t index) {
     struct fake_operations *fake = context;
     int attempt = fake->commit_attempts++;
-    check((int)index == attempt, "commit index is wrong");
+    check(fake->unchanged_mask || (int)index == attempt, "commit index is wrong");
+    check(!(fake->unchanged_mask & (1u << index)), "unchanged artifact was committed");
     check(artifact->destination != NULL, "commit destination is missing");
     if (attempt == fake->fail_commit_at)
         return -1;
@@ -137,6 +139,14 @@ static int fake_run(void *context, const char *const arguments[]) {
     return attempt == fake->fail_run_at ? -1 : 0;
 }
 
+static int fake_unchanged(void *context,
+                          const struct np_session_stack_artifact *artifact,
+                          size_t index) {
+    struct fake_operations *fake = context;
+    check(artifact->destination != NULL, "unchanged destination is missing");
+    return (fake->unchanged_mask & (1u << index)) != 0;
+}
+
 static const struct np_session_stack_artifact artifacts[] = {
     {"session", "/session", 0755},
     {"compositor", "/compositor", 0755},
@@ -153,6 +163,7 @@ static int apply(enum np_session_stack_service service,
         .finish = fake_finish,
         .discard = fake_discard,
         .run = fake_run,
+        .unchanged = fake_unchanged,
         .context = fake,
     };
     return np_session_stack_apply(
@@ -369,7 +380,90 @@ static void test_file_backup_rollback_and_finish(void) {
           "could not remove transaction fixtures");
 }
 
+static void test_unchanged_stack_keeps_running_session(void) {
+    struct fake_operations fake = {
+        .fail_install_at = -1, .fail_commit_at = -1, .fail_run_at = -1,
+        .unchanged_mask = 0xf,
+    };
+    check(apply(NP_SESSION_STACK_SYSTEMD, &fake) == 0,
+          "unchanged systemd stack failed");
+    check(fake.commit_attempts == 0, "unchanged stack replaced a destination");
+    check(fake.discard_attempts == 4, "unchanged staged artifacts were not discarded");
+    check(fake.restart_attempts == 0, "unchanged stack restarted the session");
+    check(fake.run_attempts == 1 &&
+          strcmp(fake.commands[0], "systemctl start nativepipe-session.service") == 0,
+          "unchanged systemd stack did not only ensure the session runs");
+
+    struct fake_operations openrc = {
+        .fail_install_at = -1, .fail_commit_at = -1, .fail_run_at = -1,
+        .unchanged_mask = 0xf,
+    };
+    check(apply(NP_SESSION_STACK_OPENRC, &openrc) == 0,
+          "unchanged OpenRC stack failed");
+    check(openrc.restart_attempts == 0, "unchanged OpenRC stack restarted the session");
+    check(openrc.run_attempts == 1 &&
+          strcmp(openrc.commands[0], "rc-service nativepipe-session start") == 0,
+          "unchanged OpenRC stack did not only ensure the session runs");
+}
+
+static void test_partly_changed_stack_commits_only_changes(void) {
+    struct fake_operations fake = {
+        .fail_install_at = -1, .fail_commit_at = -1, .fail_run_at = 2,
+        .unchanged_mask = 0x5,
+    };
+    check(apply(NP_SESSION_STACK_SYSTEMD, &fake) < 0,
+          "failed restart of a partly changed stack was accepted");
+    check(fake.commit_attempts == 2, "partly changed stack committed the wrong count");
+    check(fake.discard_attempts == 2, "unchanged artifacts were not discarded");
+    check(fake.rollback_attempts == 2 && fake.rollback_order[0] == 3 &&
+          fake.rollback_order[1] == 1,
+          "partly changed stack did not roll back only its changes");
+
+    struct fake_operations success = {
+        .fail_install_at = -1, .fail_commit_at = -1, .fail_run_at = -1,
+        .unchanged_mask = 0x5,
+    };
+    check(apply(NP_SESSION_STACK_SYSTEMD, &success) == 0,
+          "partly changed stack failed");
+    check(success.restart_attempts == 1, "changed stack did not restart once");
+    check(success.finish_attempts == 2, "only changed artifacts are finalized");
+}
+
+static void test_same_file_compares_bytes_and_mode(void) {
+    char directory[] = "/tmp/nativepipe-session-same.XXXXXX";
+    int directory_fixture = mkstemp(directory);
+    check(directory_fixture >= 0 && close(directory_fixture) == 0 &&
+          unlink(directory) == 0 && mkdir(directory, 0700) == 0,
+          "could not create comparison directory");
+    char staged[256], target[256], link[256];
+    snprintf(staged, sizeof(staged), "%s/staged", directory);
+    snprintf(target, sizeof(target), "%s/target", directory);
+    snprintf(link, sizeof(link), "%s/link", directory);
+    write_text(staged, "same");
+    check(np_session_stack_same_file(staged, target, 0600) == 0,
+          "missing destination compared equal");
+    write_text(target, "same");
+    check(np_session_stack_same_file(staged, target, 0600) == 1,
+          "identical destination compared different");
+    check(np_session_stack_same_file(staged, target, 0644) == 0,
+          "different permission bits compared equal");
+    write_text(target, "sane");
+    check(np_session_stack_same_file(staged, target, 0600) == 0,
+          "different bytes compared equal");
+    write_text(target, "same!");
+    check(np_session_stack_same_file(staged, target, 0600) == 0,
+          "different size compared equal");
+    check(symlink(staged, link) == 0, "could not create comparison link");
+    check(np_session_stack_same_file(staged, link, 0600) == 0,
+          "symbolic link destination compared equal");
+    check(unlink(link) == 0 && unlink(target) == 0 && unlink(staged) == 0 &&
+          rmdir(directory) == 0, "could not remove comparison fixtures");
+}
+
 int main(void) {
+    test_unchanged_stack_keeps_running_session();
+    test_partly_changed_stack_commits_only_changes();
+    test_same_file_compares_bytes_and_mode();
     test_partial_pull_does_not_restart();
     test_invalid_service_changes_nothing();
     test_commit_failure_does_not_restart();
